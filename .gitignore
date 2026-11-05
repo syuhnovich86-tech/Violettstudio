@@ -5,6 +5,9 @@
 *.pem
 *.key
 *.token
+*.p12
+*.pfx
+*.token
 
 .venv/
 __pycache__/

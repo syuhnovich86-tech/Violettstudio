@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     # Banner generation is deliberately separate from the copy-writing model.
     # A higher-quality image model is the default because a polished first
     # creative is cheaper than repeatedly regenerating a weak draft.
-    openai_image_model: str = "gpt-image-2.5-sunburst"
+    openai_image_model: str = "gpt-image-2.6-sunburst"
     openai_http_timeout_seconds: float = Field(default=60.0, gt=0, le=180)
     telegram_bot_token_file: Path = Path("/run/secrets/telegram_bot_token")
     telegram_channel_file: Path = Path("/run/secrets/telegram_channel")

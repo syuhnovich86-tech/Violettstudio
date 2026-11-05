@@ -37,7 +37,9 @@ Act as a senior beauty-studio marketer and art director. The banner has one
 commercial idea only: one service, one benefit or offer, one clear action.
 
 The studio, not the image model, typesets all readable Russian text. Create a
-clean dark visual with a deliberately empty safe area; never add letters,
+deliberately clean safe area in the selected visual family: either deep
+charcoal with champagne-gold accents, or warm ivory with restrained taupe
+editorial accents. Never add letters,
 numbers, logos, watermarks, pseudo-Cyrillic or generic labels such as
 "advertising banner". The local composition uses a fixed hierarchy:
 1) a short offer heading, 2) a concrete service/value, 3) price or condition,
@@ -75,6 +77,25 @@ _GOLD_TEXT = (235, 194, 119, 255)
 _GOLD_TEXT_BRIGHT = (255, 221, 151, 255)
 _GOLD_SHADOW = (8, 6, 4, 220)
 _GOLD_OUTLINE = (92, 61, 24, 245)
+_IVORY = (245, 239, 231, 255)
+_TAUPE = (104, 82, 70, 255)
+_TAUPE_SOFT = (166, 143, 126, 255)
+
+
+def _visual_style(topic_hint: str, instruction: str | None, *, collage: bool = False) -> str:
+    """Choose the requested brand family without relying on an image model.
+
+    The editor can name a style in natural Russian.  Collages default to the
+    light editorial family because real result photos stay more legible on the
+    ivory layout; ordinary campaign imagery keeps the established dark-gold
+    family unless the editor asks otherwise.
+    """
+    text = f"{topic_hint}\n{instruction or ''}".casefold()
+    if re.search(r"светл|крем|молоч|беж|нюд|редакцион|editorial|light", text):
+        return "light"
+    if re.search(r"т[её]мн|ч[её]рн|графит|золот|dark", text):
+        return "dark"
+    return "light" if collage else "dark"
 
 
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
@@ -99,15 +120,17 @@ def _serif_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     return _font(size, bold=bold)
 
 
-def _draw_brand_lockup(draw: ImageDraw.ImageDraw, x: int, y: int, scale: float = 1.0) -> None:
+def _draw_brand_lockup(
+    draw: ImageDraw.ImageDraw, x: int, y: int, scale: float = 1.0, *, style: str = "dark"
+) -> None:
     """Paint the studio logo as a transparent lockup.
 
     Image models are deliberately not trusted with brand marks or Cyrillic
     lettering.  This lockup has no opaque backing rectangle: it is composited
     directly over the generated image, just like a transparent logo asset.
     """
-    soft_gold = (225, 185, 117, 235)
-    brand_gold = _GOLD_TEXT_BRIGHT
+    soft_gold = (225, 185, 117, 235) if style == "dark" else _TAUPE_SOFT
+    brand_gold = _GOLD_TEXT_BRIGHT if style == "dark" else _TAUPE
     size = round(88 * scale)
     stroke = max(2, round(2 * scale))
     draw.rectangle((x, y, x + size, y + size), outline=soft_gold, width=stroke)
@@ -121,7 +144,8 @@ def _draw_brand_lockup(draw: ImageDraw.ImageDraw, x: int, y: int, scale: float =
         width=max(2, round(4 * scale)),
     )
     word_x = x + size + round(22 * scale)
-    draw.text((word_x, y + round(22 * scale)), "V I O L E T T A", font=_serif_font(round(29 * scale)), fill=brand_gold)
+    draw.text((word_x, y + round(9 * scale)), "СТУДИЯ ЭСТЕТИКИ", font=_font(round(14 * scale)), fill=brand_gold)
+    draw.text((word_x, y + round(34 * scale)), "V I O L E T T A", font=_serif_font(round(29 * scale)), fill=brand_gold)
 
 
 def _generated_workspace(db: Session, actor_id: str) -> Workspace:
@@ -141,17 +165,29 @@ def _generated_workspace(db: Session, actor_id: str) -> Workspace:
 
 
 def _visual_prompt(topic_hint: str, instruction: str, has_source: bool) -> str:
+    style = _visual_style(topic_hint, instruction)
+    if style == "light":
+        art_direction = (
+            "warm ivory, cream and sand editorial background, subtle taupe line art and restrained "
+            "warm-brown accents. Use clean beauty-magazine styling, smooth rounded organic panels, "
+            "quiet botanical line motifs in the outer edge only, and generous breathing room. Place a "
+            "natural close beauty portrait or the relevant treatment result on one side and keep the "
+            "opposite/lower area clean for local typography. It must feel like an elegant VIOLETTA "
+            "editorial layout, never like a generic pastel Instagram template. "
+        )
+    else:
+        art_direction = (
+            "deep near-black/charcoal and espresso background (#12100e), restrained champagne-gold "
+            "accents, very thin Art-Deco gold arcs and frames, and fine flowing metallic-gold silk "
+            "ribbons only in the outer corners. Use cinematic beauty-studio lighting, calm luxury "
+            "editorial composition, generous clean negative space and refined asymmetry. A natural "
+            "close beauty portrait occupies the left half; the right half and lower third remain calm "
+            "and uncluttered for local campaign copy. "
+        )
     base = (
         "Create one polished premium 2:3 vertical social-media visual for VIOLETTA, a Russian "
-        "aesthetics studio. The exact brand art direction is: deep near-black/charcoal and espresso "
-        "background (#12100e), restrained champagne-gold typography accents, very thin Art-Deco gold "
-        "arcs and frames, and fine flowing metallic-gold silk ribbons only in the outer corners. "
-        "Use cinematic beauty-studio lighting, calm luxury editorial composition, generous clean "
-        "negative space and refined asymmetry. For an advertising visual, follow this fixed VIOLETTA "
-        "layout reference: a natural close beauty portrait occupies the left half; the right half and "
-        "lower third remain calm, dark and uncluttered for the studio's locally added campaign copy. "
-        "It must look like a high-end VIOLETTA studio campaign, not a generic bright Instagram template: "
-        "no neon, no pink or blue gradients, no loud stickers, no childish graphics, no stock-looking collage. "
+        f"aesthetics studio. The requested visual family is {style}. {art_direction}"
+        "No neon, no pink or blue gradients, no loud stickers, no childish graphics, no stock-looking collage. "
         "Do not render letters, words, numbers, logos, watermarks or gibberish; the transparent studio "
         "logo and any requested readable copy are added separately after generation. Do not imitate a "
         "specific person's face from an example layout. Never change the treatment area into another procedure. "
@@ -429,14 +465,21 @@ def _campaign_copy(
     if copy:
         return copy, has_exact_copy
 
+    # A prepared caption is written by the content model and is a valid
+    # fallback only when it contains an actual offer.  A generic caption or a
+    # raw editor command must never become a fake banner heading such as
+    # «Рекламный баннер» or «Сгенерируй изображение».
     caption_copy = _caption_hint_copy(copy_hint)
-    if caption_copy:
+    if caption_copy and re.search(r"акци|скидк|купон|подар|₽|руб|комплекс", caption_copy, flags=re.IGNORECASE):
         return _normalize_campaign_text(caption_copy), False
 
     found = explicit_copy(title)
     if found:
         return found, True
-    return _normalize_campaign_text(" ".join(_display_title(title).split())[:180]), False
+    title_copy = _display_title(title)
+    if re.search(r"сген(?:е|и)р|созда|картин|изображен|баннер|реклам|пост", title_copy, flags=re.IGNORECASE):
+        return "", False
+    return _normalize_campaign_text(" ".join(title_copy.split())[:180]), False
 
 
 def _split_offers(copy: str) -> list[tuple[str, str | None]]:
@@ -507,6 +550,8 @@ def _draw_campaign_copy(
 ) -> None:
     """Lay out a readable offer card locally, rather than trusting AI text."""
     copy, has_exact_editor_copy = _campaign_copy(title, instruction, copy_hint)
+    if not copy:
+        return
     offers = _split_offers(copy)
     has_promo = bool(re.search(r"акци|скидк|купон|подар|₽|руб", copy, flags=re.IGNORECASE))
     if not has_promo:
@@ -593,6 +638,38 @@ def _draw_campaign_copy(
         y += card_height + 18
 
 
+def _draw_light_editorial_copy(
+    draw: ImageDraw.ImageDraw,
+    title: str,
+    instruction: str | None,
+    copy_hint: str | None = None,
+) -> None:
+    """Typeset a restrained light editorial block for the ivory brand family."""
+    copy, exact = _campaign_copy(title, instruction, copy_hint)
+    if not copy:
+        return
+    # The copy is intentionally laid out by the application: Russian remains
+    # correct and editors get exactly the phrase they asked for, not AI text.
+    display = copy if exact else _capitalize_first_letter(copy)
+    font, lines, size = _fit_wrapped_text(
+        draw, display, 790, preferred_size=50, minimum_size=27, max_lines=5, serif=True
+    )
+    step = round(size * 1.23)
+    height = max(150, 70 + len(lines) * step)
+    # In the light collage the large hero photograph reaches about y=910.
+    # Keeping the copy below it preserves the result image and makes the
+    # editorial hierarchy match the approved references.
+    top = max(940, 1278 - height)
+    draw.rounded_rectangle(
+        (132, top, 1028, 1288), radius=34,
+        fill=(247, 241, 233, 238), outline=(183, 158, 137, 220), width=2,
+    )
+    y = top + 35
+    for line in lines:
+        draw.text((580, y), line, font=font, fill=_TAUPE, anchor="ma")
+        y += step
+
+
 def _overlay_brand_caption(
     image_bytes: bytes,
     title: str,
@@ -607,56 +684,100 @@ def _overlay_brand_caption(
     with Image.open(io.BytesIO(image_bytes)) as source:
         image = ImageOps.fit(ImageOps.exif_transpose(source).convert("RGB"), (1080, 1350), method=Image.Resampling.LANCZOS)
     draw = ImageDraw.Draw(image, "RGBA")
-    _draw_brand_lockup(draw, 52, 46)
-    _draw_campaign_copy(draw, title, instruction, copy_hint)
+    style = _visual_style(title, instruction)
+    _draw_brand_lockup(draw, 52, 46, style=style)
+    if style == "light":
+        _draw_light_editorial_copy(draw, title, instruction, copy_hint)
+    else:
+        _draw_campaign_copy(draw, title, instruction, copy_hint)
     output = io.BytesIO()
     image.save(output, format="JPEG", quality=93, optimize=True)
     return output.getvalue()
 
 
-def _before_after_collage(source_media: list[MediaFile], settings: Settings, title: str) -> bytes:
-    """Make a branded before/after collage without modifying a client's result photos."""
-    canvas = Image.new("RGB", (1080, 1350), (16, 13, 11))
+def _paste_rounded(
+    canvas: Image.Image, image: Image.Image, box: tuple[int, int, int, int], radius: int
+) -> None:
+    """Paste an archival photograph into a soft editorial card without altering it."""
+    x, y, width, height = box
+    card = ImageOps.fit(image, (width, height), method=Image.Resampling.LANCZOS)
+    mask = Image.new("L", (width, height), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, width, height), radius=radius, fill=255)
+    canvas.paste(card, (x, y), mask)
+
+
+def _before_after_collage(
+    source_media: list[MediaFile], settings: Settings, title: str,
+    instruction: str | None = None, copy_hint: str | None = None,
+) -> bytes:
+    """Create a real-photo collage in the dark or light VIOLETTA design family.
+
+    This uses the selected client photographs exactly as supplied.  The image
+    model is not asked to redraw results, so the editor never gets a plausible
+    but inaccurate clinical result photo.
+    """
+    style = _visual_style(title, instruction, collage=True)
+    canvas = Image.new("RGB", (1080, 1350), (244, 238, 230) if style == "light" else (16, 13, 11))
     draw = ImageDraw.Draw(canvas, "RGBA")
-    gold = (233, 194, 120, 255)
-    _draw_brand_lockup(draw, 52, 34, 0.88)
+    border = _TAUPE_SOFT if style == "light" else (233, 194, 120, 255)
+    _draw_brand_lockup(draw, 50, 38, 0.82, style=style)
     sources: list[Image.Image] = []
     for entry in source_media[:4]:
         with Image.open(original_path(settings, entry.storage_key)) as image:
             sources.append(ImageOps.exif_transpose(image).convert("RGB"))
-    if len(sources) == 2:
-        placements = [(70, 154, 940, 500), (70, 706, 940, 500)]
-        labels = ("ДО", "ПОСЛЕ")
+
+    if style == "light":
+        # A magazine-style asymmetric grid: a hero result with supporting
+        # close-ups.  It closely matches the approved light references while
+        # remaining entirely deterministic and faithful to the source photos.
+        placements_by_count = {
+            2: [(58, 188, 420, 480), (514, 188, 508, 720)],
+            3: [(58, 188, 408, 356), (58, 572, 408, 356), (500, 188, 522, 740)],
+            4: [(58, 188, 398, 332), (58, 548, 398, 332), (58, 908, 398, 300), (492, 188, 530, 650)],
+        }
+        placements = placements_by_count.get(len(sources), placements_by_count[4])
+        for index, image in enumerate(sources):
+            x, y, width, height = placements[index]
+            _paste_rounded(canvas, image, (x, y, width, height), 32)
+            draw.rounded_rectangle((x - 2, y - 2, x + width + 2, y + height + 2), radius=34, outline=border, width=2)
+        # Decorative line, kept behind text and away from result details.
+        draw.arc((26, 1020, 1060, 1550), 188, 334, fill=(184, 160, 140, 105), width=4)
+        _draw_light_editorial_copy(draw, title, instruction, copy_hint)
     else:
-        placements = [(56, 154, 464, 492), (560, 154, 464, 492), (56, 690, 464, 492), (560, 690, 464, 492)]
-        labels = tuple("" for _ in range(len(sources)))
-    for index, image in enumerate(sources):
-        x, y, width, height = placements[index]
-        card = ImageOps.fit(image, (width, height), method=Image.Resampling.LANCZOS)
-        canvas.paste(card, (x, y))
-        draw.rounded_rectangle((x - 3, y - 3, x + width + 3, y + height + 3), radius=14, outline=gold, width=3)
-        if labels[index]:
-            draw.rounded_rectangle((x + 18, y + 18, x + 150, y + 62), radius=16, fill=(11, 9, 7, 210))
-            _draw_firm_gold_text(
-                draw, (x + 38, y + 27), labels[index], _font(22, bold=True), anchor="la", fill=_GOLD_TEXT_BRIGHT
-            )
-    title_text = " ".join(_display_title(title).split())[:72]
-    if title_text:
-        title_font, title_lines, title_size = _fit_wrapped_text(
-            draw, title_text, 860, preferred_size=30, minimum_size=21, max_lines=2, bold=True
-        )
-        title_step = round(title_size * 1.2)
-        title_height = max(86, min(116, 36 + len(title_lines) * title_step))
-        title_top = 1320 - title_height
-        draw.rounded_rectangle(
-            (52, title_top, 1028, 1320), radius=24, fill=(7, 6, 5, 225), outline=(220, 175, 90, 210), width=2
-        )
-        _draw_centered_lines(
-            draw, title_lines, title_top + 24, title_font, title_step, fill=_GOLD_TEXT
-        )
+        if len(sources) == 2:
+            placements = [(70, 154, 940, 500), (70, 706, 940, 500)]
+            labels = ("ДО", "ПОСЛЕ")
+        else:
+            placements = [(56, 154, 464, 492), (560, 154, 464, 492), (56, 690, 464, 492), (560, 690, 464, 492)]
+            labels = tuple("" for _ in range(len(sources)))
+        for index, image in enumerate(sources):
+            x, y, width, height = placements[index]
+            _paste_rounded(canvas, image, (x, y, width, height), 14)
+            draw.rounded_rectangle((x - 3, y - 3, x + width + 3, y + height + 3), radius=14, outline=border, width=3)
+            if labels[index]:
+                draw.rounded_rectangle((x + 18, y + 18, x + 150, y + 62), radius=16, fill=(11, 9, 7, 210))
+                _draw_firm_gold_text(
+                    draw, (x + 38, y + 27), labels[index], _font(22, bold=True), anchor="la", fill=_GOLD_TEXT_BRIGHT
+                )
+        _draw_campaign_copy(draw, title, instruction, copy_hint)
     output = io.BytesIO()
     canvas.save(output, format="JPEG", quality=94, optimize=True)
     return output.getvalue()
+
+
+def _requires_true_photo_edit(instruction: str) -> bool:
+    """Return true only for a real retouch/object-change request.
+
+    Selecting several photos normally means “make a collage”.  It must not
+    accidentally become an image-model redraw merely because an editor wrote
+    a general phrase such as “add a post”.
+    """
+    return bool(re.search(
+        r"ретуш|убер(?:и|ть)|удал(?:и|ить)|замен(?:и|ить)|"
+        r"перчатк|маск[ауи]|добав(?:ь|ить).{0,45}(?:на фото|в кадр|в изображен)|"
+        r"измен(?:и|ить).{0,45}(?:фото|изображен|лиц|кож)",
+        instruction.casefold(),
+    ))
 
 
 def _save_generated_image(
@@ -697,10 +818,10 @@ def generate_branded_visual(
     # The order selected in the archive is meaningful: for two photos it is
     # "before" then "after". Render this locally so the client result is never
     # invented or mixed by an image model.
-    if len(image_sources) >= 2 and not force_edit:
+    if len(image_sources) >= 2 and (not force_edit or not _requires_true_photo_edit(instruction)):
         return _save_generated_image(
             db, settings, item, actor_id, instruction,
-            _before_after_collage(image_sources, settings, item.title),
+            _before_after_collage(image_sources, settings, item.title, instruction, copy_hint),
         )
     api_key = read_openai_secret(settings)
     image_model = config_value(settings, "openai_image_model", settings.openai_image_model)

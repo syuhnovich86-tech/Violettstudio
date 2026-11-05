@@ -1,0 +1,11 @@
+backend/.data/
+backend/.pytest_cache/
+backend/.ruff_cache/
+backend/.venv/
+frontend/node_modules/
+frontend/dist/
+.data/
+tmp/
+*.tar.gz
+__pycache__/
+*.pyc
