@@ -49,6 +49,8 @@ class UserResponse(BaseModel):
     can_view_all_calendars: bool
     can_access_admin: bool
     can_access_chats: bool
+    can_access_content: bool
+    can_import_ios_photo_library: bool
 
 
 class SessionResponse(BaseModel):
@@ -70,6 +72,10 @@ def user_response(user: User) -> UserResponse:
         can_view_all_calendars=user.can_view_all_calendars,
         can_access_admin=user.role.value == "owner" or user.can_access_admin,
         can_access_chats=user.role.value == "owner" or user.can_access_chats,
+        can_access_content=user.role.value == "owner" or user.can_access_content,
+        can_import_ios_photo_library=(
+            user.role.value == "owner" or user.can_import_ios_photo_library
+        ),
     )
 
 

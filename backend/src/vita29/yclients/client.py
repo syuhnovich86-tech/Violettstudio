@@ -111,6 +111,50 @@ class YclientsClient:
             raise YclientsError("YCLIENTS returned invalid records data")
         return data
 
+    def list_book_times(self, salon_id: int, staff_id: int, day: str) -> list[str]:
+        """Return only times explicitly offered by YCLIENTS online booking.
+
+        This is intentionally not inferred from an empty interval in the local cache:
+        an unbooked-looking interval can still be outside of a master's schedule.
+        """
+        try:
+            response = httpx.get(
+                f"{self.settings.yclients_api_base_url.rstrip('/')}/api/v1/book_times/"
+                f"{salon_id}/{staff_id}/{day}",
+                headers=self._user_headers(),
+                timeout=self.settings.yclients_http_timeout_seconds,
+            )
+            response.raise_for_status()
+            payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise YclientsError("YCLIENTS free slots request failed") from exc
+        data = payload.get("data")
+        if not isinstance(data, list):
+            raise YclientsError("YCLIENTS returned invalid free slots")
+        result: list[str] = []
+        for value in data:
+            # The studio advertises only appointment windows of one hour or
+            # longer.  YCLIENTS provides the duration in seconds for every
+            # bookable interval, so discard shorter slots before they can
+            # reach the availability-card generator.
+            if not isinstance(value, dict):
+                continue
+            # Some YCLIENTS responses include ``seance_length`` with a null
+            # value while the actual duration is provided as ``sum_length``.
+            # Treat those records exactly like an omitted seance_length;
+            # otherwise valid hour-long windows disappear from the planner.
+            duration = value.get("seance_length") or value.get("sum_length")
+            try:
+                duration_seconds = int(duration)
+            except (TypeError, ValueError):
+                continue
+            if duration_seconds < 60 * 60:
+                continue
+            candidate = value.get("time")
+            if isinstance(candidate, str) and candidate.strip():
+                result.append(candidate.strip())
+        return result
+
     def list_clients_by_ids(self, salon_id: int, client_ids: list[int]) -> list[dict[str, Any]]:
         if not client_ids:
             return []

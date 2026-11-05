@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     geonames_cities_path: Path = Path("/data/geonames/cities500.txt")
     minimum_free_bytes: int = Field(default=512 * 1024 * 1024, ge=0)
     session_lifetime_hours: int = Field(default=12, ge=1, le=168)
+    mobile_session_lifetime_hours: int = Field(default=720, ge=24, le=2160)
     cookie_secure: bool = False
     max_file_bytes: int = Field(default=2 * 1024 * 1024 * 1024, ge=1024)
     upload_chunk_bytes: int = Field(default=1024 * 1024, ge=64 * 1024, le=8 * 1024 * 1024)
@@ -31,11 +32,27 @@ class Settings(BaseSettings):
     yclients_application_id: int = Field(default=49434, ge=1)
     yclients_api_base_url: str = "https://api.yclients.com"
     yclients_public_base_url: str = "https://31-10-64-46.sslip.io"
+    # Kept separate from YCLIENTS because Meta must fetch originals directly
+    # from a public HTTPS URL, never from a user's authenticated session.
+    public_base_url: str = "https://31-10-64-46.sslip.io"
     yclients_user_token_file: Path = Path("/run/secrets/yclients_user_token")
     yclients_partner_token_file: Path = Path("/run/secrets/yclients_partner_token")
     yclients_http_timeout_seconds: float = Field(default=15.0, gt=0, le=60)
     vapid_private_key_file: Path = Path("/run/secrets/vapid_private.pem")
     vapid_subject: str = "https://31-10-64-46.sslip.io"
+    openai_api_key_file: Path = Path("/run/secrets/openai_api_key")
+    openai_content_model: str = "gpt-6-luna"
+    # Banner generation is deliberately separate from the copy-writing model.
+    # A higher-quality image model is the default because a polished first
+    # creative is cheaper than repeatedly regenerating a weak draft.
+    openai_image_model: str = "gpt-image-2.5-sunburst"
+    openai_http_timeout_seconds: float = Field(default=60.0, gt=0, le=180)
+    telegram_bot_token_file: Path = Path("/run/secrets/telegram_bot_token")
+    telegram_channel_file: Path = Path("/run/secrets/telegram_channel")
+    telegram_http_timeout_seconds: float = Field(default=90.0, gt=0, le=300)
+    integration_secrets_path: Path = Path("/data/app/integrations/secrets")
+    integration_config_path: Path = Path("/data/app/integrations/config.json")
+    mobile_updates_root: Path = Path("/data/app/mobile-updates")
 
     @property
     def originals_path(self) -> Path:

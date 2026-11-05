@@ -2,7 +2,7 @@ import json
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select
@@ -28,6 +28,13 @@ from vita29.discussions.service import (
     create_batch_discussion,
 )
 from vita29.media.places import get_place_resolver
+from vita29.media.sharing import (
+    ShareVideoStatus,
+    get_prepared_share_video,
+    get_share_video_status,
+    prepare_share_video,
+    remove_share_video,
+)
 from vita29.media.storage import (
     FileTooLargeError,
     InsufficientStorageError,
@@ -67,6 +74,7 @@ class MediaResponse(BaseModel):
     location_key: str | None
     can_delete: bool
     publication_allowed: bool
+    content_marked: bool
     comment: str | None
     batch_id: str | None
     batch_comment: str | None
@@ -78,6 +86,10 @@ class MoveMediaRequest(BaseModel):
 
 class PublicationRequest(BaseModel):
     publication_allowed: bool
+
+
+class ContentMarkRequest(BaseModel):
+    content_marked: bool
 
 
 class MediaCommentRequest(BaseModel):
@@ -118,6 +130,22 @@ class MediaFilterOptions(BaseModel):
     without_location_count: int
 
 
+class ShareVideoResponse(BaseModel):
+    state: str
+    progress: int
+    size_bytes: int | None = None
+    error: str | None = None
+
+
+def share_video_response(job: ShareVideoStatus) -> ShareVideoResponse:
+    return ShareVideoResponse(
+        state=job.state,
+        progress=job.progress,
+        size_bytes=job.size_bytes,
+        error=job.error,
+    )
+
+
 def media_response(media: MediaFile, user: User) -> MediaResponse:
     return MediaResponse(
         id=media.id,
@@ -136,6 +164,7 @@ def media_response(media: MediaFile, user: User) -> MediaResponse:
         location_city=media.location_city,
         location_key=media.location_key,
         publication_allowed=media.publication_allowed,
+        content_marked=media.content_marked,
         comment=media.comment,
         batch_id=media.batch_id,
         batch_comment=media.batch.comment if media.batch is not None else None,
@@ -279,7 +308,7 @@ def media_filter_options(
     workspace_id: Annotated[str, Query()],
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
-    capture_year: Annotated[int | None, Query(ge=1970, le=2200)] = None,
+    capture_year: Annotated[int | None, Query(ge=1900, le=2200)] = None,
     capture_month: Annotated[int | None, Query(ge=1, le=12)] = None,
 ) -> MediaFilterOptions:
     get_accessible_workspace(db, workspace_id, user)
@@ -427,6 +456,7 @@ def create_media_batch(
 
 @router.post("", response_model=MediaResponse, status_code=status.HTTP_201_CREATED)
 def upload_media(
+    request: Request,
     _: Annotated[AuthSession, Depends(require_csrf)],
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
@@ -440,6 +470,13 @@ def upload_media(
     if not user.can_upload_media:
         raise HTTPException(status_code=403, detail="Media upload is disabled")
     workspace = get_accessible_workspace(db, workspace_id, user)
+    if (
+        request.headers.get("authorization", "").lower().startswith("bearer ")
+        and workspace.display_name == settings.import_workspace_name
+        and user.role != UserRole.OWNER
+        and not user.can_import_ios_photo_library
+    ):
+        raise HTTPException(status_code=403, detail="iPhone library import is disabled")
 
     batch = None
     if batch_id is not None:
@@ -489,9 +526,7 @@ def upload_media(
         workspace_id=workspace.id,
         uploaded_by_id=user.id,
         yclients_record_id=visit.record_id if visit is not None else None,
-        publication_allowed=(
-            True if workspace.kind == WorkspaceKind.PRIVATE else publication_allowed
-        ),
+        publication_allowed=publication_allowed,
         batch_id=batch.id if batch is not None else None,
         location_country=location_country,
         location_city=location_city,
@@ -594,9 +629,12 @@ def update_publication(
 ) -> MediaResponse:
     media = get_accessible_media(db, file_id, user)
     previous = media.publication_allowed
-    media.publication_allowed = (
-        True if media.workspace.kind == WorkspaceKind.PRIVATE else payload.publication_allowed
-    )
+    media.publication_allowed = payload.publication_allowed
+    # A file which may not be published must never remain in the editorial
+    # content pool.  This also keeps old markings safe after a user revokes
+    # publication consent.
+    if not media.publication_allowed:
+        media.content_marked = False
     db.add(
         AuditLog(
             actor_id=user.id,
@@ -616,6 +654,38 @@ def update_publication(
     except SQLAlchemyError as error:
         db.rollback()
         raise HTTPException(status_code=500, detail="Could not update publication status") from error
+    db.refresh(media)
+    return media_response(media, user)
+
+
+@router.put("/{file_id}/content-mark", response_model=MediaResponse)
+def update_content_mark(
+    file_id: str,
+    payload: ContentMarkRequest,
+    _: Annotated[AuthSession, Depends(require_csrf)],
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+) -> MediaResponse:
+    """Keep an editorial marker on a permitted media file for later reuse."""
+    if not user.can_access_content:
+        raise HTTPException(status_code=403, detail="Content access is disabled")
+    media = get_accessible_media(db, file_id, user)
+    if payload.content_marked and not media.publication_allowed:
+        raise HTTPException(status_code=409, detail="Сначала разрешите публикацию этого файла")
+    previous = media.content_marked
+    media.content_marked = payload.content_marked
+    db.add(AuditLog(
+        actor_id=user.id,
+        action="media.content_mark.update",
+        target_type="media_file",
+        target_id=media.id,
+        details=json.dumps({"from": previous, "to": media.content_marked}),
+    ))
+    try:
+        db.commit()
+    except SQLAlchemyError as error:
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Could not update content mark") from error
     db.refresh(media)
     return media_response(media, user)
 
@@ -718,6 +788,55 @@ def download_media(
     return FileResponse(path, media_type=media.mime_type, filename=media.original_name)
 
 
+@router.post("/{file_id}/share/prepare")
+def prepare_video_for_share(
+    file_id: str,
+    _: Annotated[AuthSession, Depends(require_csrf)],
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ShareVideoResponse:
+    media = get_accessible_media(db, file_id, user)
+    if media.media_type.value != "video":
+        raise HTTPException(status_code=422, detail="File is not a video")
+    return share_video_response(
+        prepare_share_video(settings, media.storage_key, media.id)
+    )
+
+
+@router.get("/{file_id}/share/status")
+def video_share_status(
+    file_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ShareVideoResponse:
+    media = get_accessible_media(db, file_id, user)
+    if media.media_type.value != "video":
+        raise HTTPException(status_code=422, detail="File is not a video")
+    return share_video_response(get_share_video_status(settings, media.id))
+
+
+@router.get("/{file_id}/share/download")
+def download_video_for_share(
+    file_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> FileResponse:
+    media = get_accessible_media(db, file_id, user)
+    if media.media_type.value != "video":
+        raise HTTPException(status_code=422, detail="File is not a video")
+    path = get_prepared_share_video(settings, media.storage_key, media.id)
+    if path is None:
+        raise HTTPException(status_code=409, detail="Video is not ready for sharing")
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        filename=f"Violetta-video-{media.id[:8]}.mp4",
+    )
+
+
 @router.delete("/{file_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_media(
     file_id: str,
@@ -751,3 +870,4 @@ def delete_media(
             restore_from_trash(settings, media.storage_key, trash_path)
         raise HTTPException(status_code=500, detail="Could not delete file") from error
     thumbnail_path(settings, media.id).unlink(missing_ok=True)
+    remove_share_video(settings, media.id)

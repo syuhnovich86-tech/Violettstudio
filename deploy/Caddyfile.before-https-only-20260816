@@ -1,0 +1,25 @@
+(vita29_app) {
+    encode zstd gzip
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        Content-Security-Policy "default-src 'self'; img-src 'self' data:; media-src 'self' blob:; style-src 'self'; script-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    }
+    request_body {
+        max_size 2GB
+    }
+    reverse_proxy app:8000
+}
+
+http:// {
+    @public host 31-10-64-46.sslip.io
+    redir @public https://{host}{uri} permanent
+    import vita29_app
+}
+
+31-10-64-46.sslip.io {
+    import vita29_app
+}

@@ -36,3 +36,29 @@ frontend/*.tsbuildinfo
 *.tsv
 .DS_Store
 Thumbs.db
+# Local runtime data and credentials — never publish.
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
+
+# Local databases, media and imported personal materials.
+*.db
+*.sqlite
+*.sqlite3
+backend/.data/
+media/
+data/
+tmp/
+
+# Build and test artefacts.
+backend/.venv/
+backend/.pytest_cache/
+backend/.ruff_cache/
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
+__pycache__/
+*.py[cod]

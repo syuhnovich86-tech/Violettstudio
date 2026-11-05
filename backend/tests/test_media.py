@@ -517,6 +517,10 @@ def test_private_archive_can_be_filtered_by_capture_year_and_existing_place(
     assert options.status_code == 200
     assert options.json() == {
         "years": [2021, 2020],
+        "months": [
+            {"year": 2021, "month": 7, "count": 1},
+            {"year": 2020, "month": 6, "count": 1},
+        ],
         "places": [
             {
                 "key": "RU · Moscow",
@@ -531,6 +535,25 @@ def test_private_archive_can_be_filtered_by_capture_year_and_existing_place(
         f"/api/v1/media?workspace_id={workspace.id}&capture_year=2020"
     )
     assert [item["original_name"] for item in by_year.json()] == ["moscow.jpg"]
+    by_month = client.get(
+        f"/api/v1/media?workspace_id={workspace.id}&capture_year=2021&capture_month=7"
+    )
+    assert [item["original_name"] for item in by_month.json()] == [
+        "without-location.jpg"
+    ]
+    filtered_options = client.get(
+        f"/api/v1/media/filter-options?workspace_id={workspace.id}&capture_year=2020"
+    )
+    assert filtered_options.status_code == 200
+    assert filtered_options.json()["places"] == [
+        {
+            "key": "RU · Moscow",
+            "country": "RU",
+            "city": "Moscow",
+            "label": "RU · Moscow",
+        }
+    ]
+    assert filtered_options.json()["without_location_count"] == 0
     by_place = client.get(
         f"/api/v1/media?workspace_id={workspace.id}&location_key=RU%20%C2%B7%20Moscow"
     )

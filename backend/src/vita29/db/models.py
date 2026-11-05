@@ -47,6 +47,37 @@ class DiscussionKind(str, enum.Enum):
     BATCH = "batch"
 
 
+class ContentStatus(str, enum.Enum):
+    DRAFT = "draft"
+    REVIEW = "review"
+    APPROVED = "approved"
+    GENERATING = "generating"
+    READY = "ready"
+    SCHEDULED = "scheduled"
+    PUBLISHED = "published"
+    FAILED = "failed"
+
+
+class ContentFormat(str, enum.Enum):
+    POST = "post"
+    STORY = "story"
+    AVAILABILITY = "availability"
+
+
+class PublicationPlatform(str, enum.Enum):
+    TELEGRAM = "telegram"
+    MAX = "max"
+    INSTAGRAM = "instagram"
+
+
+class PublicationStatus(str, enum.Enum):
+    PENDING = "pending"
+    SCHEDULED = "scheduled"
+    PUBLISHING = "publishing"
+    PUBLISHED = "published"
+    FAILED = "failed"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -63,6 +94,8 @@ class User(Base):
     can_view_all_calendars: Mapped[bool] = mapped_column(Boolean, default=False)
     can_access_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     can_access_chats: Mapped[bool] = mapped_column(Boolean, default=True)
+    can_access_content: Mapped[bool] = mapped_column(Boolean, default=False)
+    can_import_ios_photo_library: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
@@ -178,6 +211,9 @@ class MediaFile(Base):
         ForeignKey("yclients_visits.record_id", ondelete="SET NULL"), nullable=True, index=True
     )
     publication_allowed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # A deliberate editorial marker.  It is independent of a temporary UI
+    # selection and lets the content planner prioritise approved source files.
+    content_marked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     batch_id: Mapped[str | None] = mapped_column(
         ForeignKey("media_batches.id", ondelete="SET NULL"),
@@ -378,4 +414,82 @@ class PushSubscription(Base):
     endpoint: Mapped[str] = mapped_column(Text, unique=True)
     p256dh: Mapped[str] = mapped_column(Text)
     auth: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class ContentItem(Base):
+    __tablename__ = "content_item"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    title: Mapped[str] = mapped_column(String(180))
+    caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    editor_instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # This is deliberately separate from the editor note.  An instruction
+    # such as "убери маску" must invoke image editing when the editor has
+    # selected a source photo, even though it does not contain the word
+    # "сгенерируй".
+    visual_edit_requested: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    content_format: Mapped[ContentFormat] = mapped_column(
+        Enum(ContentFormat), default=ContentFormat.POST, index=True
+    )
+    media_limit: Mapped[int] = mapped_column(Integer, default=1)
+    availability_staff_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    availability_slots_json: Mapped[str] = mapped_column(Text, default="[]")
+    status: Mapped[ContentStatus] = mapped_column(Enum(ContentStatus), default=ContentStatus.DRAFT, index=True)
+    scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    media_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    created_by_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True)
+    approved_by_id: Mapped[str | None] = mapped_column(
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now
+    )
+
+
+class ContentPublication(Base):
+    __tablename__ = "content_publication"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    content_item_id: Mapped[str] = mapped_column(
+        ForeignKey("content_item.id", ondelete="CASCADE"), index=True
+    )
+    platform: Mapped[PublicationPlatform] = mapped_column(Enum(PublicationPlatform), index=True)
+    publication_format: Mapped[str] = mapped_column(String(16), default="post", server_default="post")
+    status: Mapped[PublicationStatus] = mapped_column(
+        Enum(PublicationStatus), default=PublicationStatus.PENDING, index=True
+    )
+    caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    media_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+    __table_args__ = (
+        Index("uq_content_publication_item_platform", "content_item_id", "platform", unique=True),
+    )
+
+
+class TemporaryPublicMediaLink(Base):
+    """A short-lived, opaque URL for a remote publisher such as Meta.
+
+    The raw token is never stored.  A link is valid only while the matching
+    publication is being handed to the provider and can be revoked at once.
+    """
+
+    __tablename__ = "temporary_public_media_link"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    media_file_id: Mapped[str] = mapped_column(
+        ForeignKey("media_files.id", ondelete="CASCADE"), index=True
+    )
+    publication_id: Mapped[str | None] = mapped_column(
+        ForeignKey("content_publication.id", ondelete="CASCADE"), index=True, nullable=True
+    )
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)

@@ -21,9 +21,17 @@ type User = {
   can_view_all_calendars: boolean;
   can_access_admin: boolean;
   can_access_chats: boolean;
+  can_access_content: boolean;
 };
 
 type Session = { user: User; csrf_token: string };
+type IntegrationProvider = { configured: boolean; fields: Record<string, string> };
+type IntegrationStatus = {
+  openai: IntegrationProvider;
+  telegram: IntegrationProvider;
+  max: IntegrationProvider;
+  instagram: IntegrationProvider;
+};
 type StorageStats = {
   total_bytes: number;
   used_bytes: number;
@@ -58,6 +66,7 @@ type Media = {
   location_key: string | null;
   can_delete: boolean;
   publication_allowed: boolean;
+  content_marked: boolean;
   comment: string | null;
   batch_id: string | null;
   batch_comment: string | null;
@@ -117,6 +126,18 @@ type DiscussionMedia = {
   thumbnail_url: string;
   preview_url: string;
 };
+type ContentLibraryMedia = {
+  id: string;
+  original_name: string;
+  media_type: "image" | "video";
+  thumbnail_url: string;
+  comment: string | null;
+  content_marked: boolean;
+  workspace_id: string;
+  workspace_name: string;
+};
+type ContentLibraryWorkspace = { id: string; display_name: string; kind: "studio" | "private" };
+type ContentLibraryResult = { items: ContentLibraryMedia[]; workspaces: ContentLibraryWorkspace[]; total: number; next_offset: number | null };
 type DiscussionMessageItem = {
   id: string;
   discussion_id: string;
@@ -142,6 +163,56 @@ type DiscussionNotification = {
   created_at: string;
 };
 type NotificationSummary = { unread_count: number; notifications: DiscussionNotification[] };
+type ShareVideoStatus = {
+  state: "not_started" | "pending" | "processing" | "ready" | "error";
+  progress: number;
+  size_bytes: number | null;
+  error: string | null;
+};
+type ContentPlatform = "telegram" | "max" | "instagram";
+type ContentFormat = "post" | "story" | "availability";
+type PublicationFormat = "post" | "story" | "reel";
+type ContentStatus = "draft" | "review" | "approved" | "generating" | "ready" | "scheduled" | "published" | "failed";
+type ContentPublication = {
+  id: string;
+  platform: ContentPlatform;
+  publication_format: PublicationFormat;
+  status: "pending" | "scheduled" | "publishing" | "published" | "failed";
+  caption: string | null;
+  media_ids: string[];
+  external_id: string | null;
+  error: string | null;
+  published_at: string | null;
+};
+type ContentItem = {
+  id: string;
+  title: string;
+  caption: string | null;
+  editor_instruction: string | null;
+  visual_edit_requested: boolean;
+  content_format: ContentFormat;
+  media_limit: number;
+  availability_staff_id: number | null;
+  availability_slots: { staff_id: number; staff_name: string; date: string; times: string[] }[];
+  status: ContentStatus;
+  scheduled_at: string;
+  media_ids: string[];
+  created_by_id: string;
+  approved_by_id: string | null;
+  approved_at: string | null;
+  publications: ContentPublication[];
+  created_at: string;
+  updated_at: string;
+};
+type WeeklyContentEntry = {
+  day: number;
+  title: string;
+  content_format: ContentFormat;
+  media_limit: number;
+  platforms: ContentPlatform[];
+  platform_formats: Partial<Record<ContentPlatform, PublicationFormat>>;
+};
+type AvailabilityStaff = { staff_id: number; staff_name: string; specialization: string | null };
 
 const MEDIA_PAGE_SIZE = 40;
 
@@ -216,10 +287,12 @@ function StoragePanel() {
 function MediaPanel({
   session,
   onCreateChat,
+  onCreateContent,
   mode,
 }: {
   session: Session;
   onCreateChat: (file: Media) => void;
+  onCreateContent: (files: Media[]) => void;
   mode: "add" | "browse";
 }) {
   const [files, setFiles] = useState<Media[]>([]);
@@ -269,6 +342,7 @@ function MediaPanel({
   const [browseVisitDate, setBrowseVisitDate] = useState("");
   const [browseVisitId, setBrowseVisitId] = useState<number | null>(null);
   const [browseAcrossWorkspaces, setBrowseAcrossWorkspaces] = useState(false);
+  const [contentSelection, setContentSelection] = useState<string[]>([]);
   const touchStart = useRef<{ x: number; y: number } | null>(null);
   const workspacePicker = useRef<HTMLDetailsElement | null>(null);
   const cameraVideo = useRef<HTMLVideoElement | null>(null);
@@ -319,7 +393,7 @@ function MediaPanel({
   const browseSelectedVisits = browseVisitsByDate[browseVisitDate] ?? [];
   const selectedVisits = visitsByDate[selectedVisitDate] ?? [];
   const availablePrivateMonths = captureYear
-    ? privateFilterOptions.months.filter((item) => item.year === Number(captureYear))
+    ? (privateFilterOptions.months ?? []).filter((item) => item.year === Number(captureYear))
     : [];
 
   const canSwitchAllCalendars = (session.user.role === "owner" || session.user.can_view_all_calendars) && calendarUsers.length > 1;
@@ -345,30 +419,51 @@ function MediaPanel({
     if (existing) return existing;
 
     setShareProgress((current) => ({ ...current, [file.id]: 1 }));
-    const preparation = new Promise<File>((resolve, reject) => {
-      const request = new XMLHttpRequest();
-      request.open("GET", `/api/v1/media/${file.id}/download`);
-      request.responseType = "blob";
-      request.onprogress = (event) => {
-        const percent = event.lengthComputable && event.total > 0
-          ? Math.max(1, Math.min(99, Math.round((event.loaded / event.total) * 100)))
-          : 5;
-        setShareProgress((current) => ({ ...current, [file.id]: percent }));
-      };
-      request.onload = () => {
-        if (request.status < 200 || request.status >= 300) {
-          reject(new Error("Не удалось подготовить видео"));
-          return;
+    const preparation = (async () => {
+      let status = await api<ShareVideoStatus>(`/media/${file.id}/share/prepare`, {
+        method: "POST",
+        headers: { "X-CSRF-Token": session.csrf_token },
+      });
+      while (status.state !== "ready") {
+        if (status.state === "error") {
+          throw new Error("Не удалось преобразовать видео для Android");
         }
-        const extension = file.mime_type === "video/quicktime" ? "mov" : "mp4";
-        const readyFile = new File([request.response], `Violetta-video-${file.id.slice(0, 8)}.${extension}`, { type: file.mime_type });
-        preparedShareFiles.current.set(file.id, readyFile);
-        setShareProgress((current) => ({ ...current, [file.id]: 100 }));
-        resolve(readyFile);
-      };
-      request.onerror = () => reject(new Error("Не удалось подготовить видео"));
-      request.send();
-    }).catch((reason) => {
+        const conversionProgress = Math.max(1, Math.min(85, Math.round(status.progress * 0.85)));
+        setShareProgress((current) => ({ ...current, [file.id]: conversionProgress }));
+        await new Promise((resolve) => window.setTimeout(resolve, 1000));
+        status = await api<ShareVideoStatus>(`/media/${file.id}/share/status`);
+      }
+
+      setShareProgress((current) => ({ ...current, [file.id]: 86 }));
+      return new Promise<File>((resolve, reject) => {
+        const request = new XMLHttpRequest();
+        request.open("GET", `/api/v1/media/${file.id}/share/download`);
+        request.responseType = "blob";
+        request.onprogress = (event) => {
+          const downloadProgress = event.lengthComputable && event.total > 0
+            ? Math.round((event.loaded / event.total) * 13)
+            : 1;
+          setShareProgress((current) => ({ ...current, [file.id]: Math.min(99, 86 + downloadProgress) }));
+        };
+        request.onload = () => {
+          if (request.status < 200 || request.status >= 300) {
+            reject(new Error("Не удалось загрузить подготовленное видео"));
+            return;
+          }
+          const readyFile = new File(
+            [request.response],
+            `Violetta-video-${file.id.slice(0, 8)}.mp4`,
+            { type: "video/mp4" },
+          );
+          preparedShareFiles.current.clear();
+          preparedShareFiles.current.set(file.id, readyFile);
+          setShareProgress((current) => ({ ...current, [file.id]: 100 }));
+          resolve(readyFile);
+        };
+        request.onerror = () => reject(new Error("Не удалось загрузить подготовленное видео"));
+        request.send();
+      });
+    })().catch((reason) => {
       setShareProgress((current) => {
         const next = { ...current };
         delete next[file.id];
@@ -1046,6 +1141,12 @@ function closeCamera() {
     if (navigator.share && (!navigator.canShare || navigator.canShare(payload))) {
       try {
         await navigator.share(payload);
+        preparedShareFiles.current.delete(file.id);
+        setShareProgress((current) => {
+          const next = { ...current };
+          delete next[file.id];
+          return next;
+        });
       } catch (reason) {
         if (reason instanceof DOMException && reason.name === "AbortError") return;
         if (reason instanceof DOMException && reason.name === "NotAllowedError") {
@@ -1196,6 +1297,22 @@ function closeCamera() {
     }
   }
 
+  async function updateContentMark(file: Media, marked: boolean) {
+    setMessage("");
+    try {
+      const updated = await api<Media>(`/media/${file.id}/content-mark`, {
+        method: "PUT",
+        headers: { "X-CSRF-Token": session.csrf_token },
+        body: JSON.stringify({ content_marked: marked }),
+      });
+      setFiles((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setPreview((current) => current?.id === updated.id ? updated : current);
+      setMessage(marked ? "Материал отмечен для контента" : "Отметка «для контента» снята");
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : "Не удалось изменить отметку контента");
+    }
+  }
+
   return (
     <section className={`media-panel media-page-panel ${mode}`}>
       <div className="section-heading"><div><p className="eyebrow">Папки сотрудников</p><h2>{browseAcrossWorkspaces ? "Материалы из всех папок" : activeWorkspaceInfo?.display_name || "Фото и видео"}</h2>{!browseAcrossWorkspaces && activeWorkspaceInfo?.kind === "private" && <small className="private-note">🔒 Доступ ограничен</small>}</div><span>{browseAcrossWorkspaces ? `${files.length}${hasMore ? "+" : ""}` : activeWorkspaceInfo?.file_count ?? files.length}</span></div>
@@ -1317,16 +1434,18 @@ function closeCamera() {
       </form>}
       </>}
       {message && <p className="upload-message" aria-live="polite">{message}</p>}
-      {mode === "browse" && <details className="media-action-legend"><summary>Обозначения кнопок</summary><div><span><b>↗</b> Поделиться</span><span><b>💬</b> Комментарий</span><span><b>◌</b> Создать чат</span><span><b>⇄</b> В другую папку</span><span><b>↓</b> Скачать</span><span><b>⛔</b> Запретить публикацию</span><span><b>×</b> Удалить</span></div></details>}
+      {mode === "browse" && <details className="media-action-legend"><summary>Обозначения кнопок</summary><div><span><b>✦</b> Выбрать для генерации контента</span><span><b>●</b> Бирюзовая ✦ — отмечено для контента</span><span><b>↗</b> Поделиться</span><span><b>💬</b> Комментарий</span><span><b>◌</b> Создать чат</span><span><b>⇄</b> В другую папку</span><span><b>↓</b> Скачать</span><span><b>⛔</b> Запретить публикацию</span><span><b>×</b> Удалить</span></div></details>}
       {mode === "browse" && (files.length === 0 ? <div className="empty"><strong>Здесь пока пусто</strong><span>В этой папке пока нет фото или видео.</span></div> : (
         <><div className="media-grid">{files.map((file) => (
           <article className="media-card" key={file.id}>
             {!file.publication_allowed && <span className="no-publish-badge" title="Публикация запрещена" aria-label="Публикация запрещена">⛔</span>}
             {effectiveComment(file) && <span className="comment-badge" title={effectiveComment(file) || ""}>💬</span>}
+            {session.user.can_access_content && file.publication_allowed && <button className={`content-select-on-media ${contentSelection.includes(file.id) ? "selected" : ""} ${file.content_marked ? "marked" : ""}`} type="button" title={file.content_marked ? "Материал отмечен для контента; нажмите, чтобы выбрать для этой генерации" : "Выбрать для создания контента"} aria-pressed={contentSelection.includes(file.id)} onClick={() => setContentSelection((current) => current.includes(file.id) ? current.filter((id) => id !== file.id) : [...current, file.id].slice(0, 4))}>{contentSelection.includes(file.id) ? "✓" : "✦"}</button>}
             <button className={`media-visual ${file.media_type}`} onClick={() => setPreview(file)} aria-label={`Открыть ${file.original_name}`}>
               <img src={`/api/v1/media/${file.id}/thumbnail`} alt="" loading="lazy" />
               {file.media_type === "video" && <span className="video-play" aria-hidden="true">▶</span>}
             </button>
+            {contentSelection[0] === file.id && <button className="generate-on-media" type="button" onClick={() => onCreateContent(files.filter((entry) => contentSelection.includes(entry.id)))}>✦ Создать контент / обработать фото{contentSelection.length > 1 ? ` · ${contentSelection.length} фото` : ""}</button>}
             {file.media_type === "video" && <div className={`video-share-progress ${shareProgress[file.id] === 100 ? "ready" : ""}`}><span style={{ width: `${shareProgress[file.id] ?? 0}%` }} /><b>{shareProgress[file.id] === 100 ? "Готово к отправке · 100%" : `Подготовка видео · ${shareProgress[file.id] ?? 0}%`}</b></div>}
             <div className="card-actions">
               <button className={`share-card ${file.publication_allowed ? "" : "blocked"} ${videoIsPreparing(file) ? "preparing" : ""}`} disabled={!file.publication_allowed || videoIsPreparing(file)} onClick={() => share(file)}><span aria-hidden="true">↗</span> {!file.publication_allowed ? "Запрещено" : videoIsPreparing(file) ? `Готовим ${shareProgress[file.id]}%` : "Поделиться"}</button>
@@ -1335,6 +1454,8 @@ function closeCamera() {
                 <div className="card-more-actions">
                   <button className="move-action" onClick={() => openMove(file)} title="Переместить в папку" aria-label="Переместить в папку">⇄</button>
                   <button onClick={() => openDownload(file)} title="Скачать" aria-label="Скачать">↓</button>
+                  {session.user.can_access_content && file.publication_allowed && <button onClick={() => onCreateContent([file])} title="Создать контент или обработать фото" aria-label="Создать контент или обработать фото">✦</button>}
+                  {session.user.can_access_content && file.publication_allowed && <button className={file.content_marked ? "content-mark-action marked" : "content-mark-action"} onClick={() => void updateContentMark(file, !file.content_marked)} title={file.content_marked ? "Снять отметку для контента" : "Отметить для контента"} aria-label={file.content_marked ? "Снять отметку для контента" : "Отметить для контента"}>{file.content_marked ? "●" : "○"}</button>}
                   {session.user.can_add_comments && <button onClick={() => openComment(file)} title="Добавить или изменить комментарий" aria-label="Добавить или изменить комментарий">💬</button>}
                   {session.user.can_access_chats && <button onClick={() => onCreateChat(file)} title="Создать чат с этим файлом" aria-label="Создать чат с этим файлом">◌</button>}
                   {file.workspace_kind !== "private" && <button className={`publication-action ${file.publication_allowed ? "allowed" : "forbidden"}`} onClick={() => { void updatePublication(file, !file.publication_allowed); }} title={file.publication_allowed ? "Запретить публикацию" : "Разрешить публикацию"} aria-label={file.publication_allowed ? "Запретить публикацию" : "Разрешить публикацию"}>{file.publication_allowed ? "⛔" : "✓"}</button>}
@@ -1365,6 +1486,8 @@ function closeCamera() {
               <div className="preview-actions">
                 <button className="move-preview" onClick={() => openMove(preview)}>⇄ В папку</button>
                 <button onClick={() => openDownload(preview)}>↓ Скачать</button>
+                {session.user.can_access_content && preview.publication_allowed && <button onClick={() => { const file = preview; setPreview(null); onCreateContent([file]); }}>✦ Создать контент / обработать фото</button>}
+                {session.user.can_access_content && preview.publication_allowed && <button className={preview.content_marked ? "content-mark-action marked" : "content-mark-action"} onClick={() => void updateContentMark(preview, !preview.content_marked)}>{preview.content_marked ? "● Убрать отметку контента" : "○ Отметить для контента"}</button>}
                 {session.user.can_add_comments && <button onClick={() => openComment(preview)}>💬 Комментарий</button>}
                 {session.user.can_access_chats && <button onClick={() => { const file = preview; setPreview(null); onCreateChat(file); }}>◌ Создать чат</button>}
                 {preview.workspace_kind !== "private" && <button className={`publication-toggle-preview ${preview.publication_allowed ? "allowed" : "forbidden"}`} onClick={() => { void updatePublication(preview, !preview.publication_allowed); }}>{preview.publication_allowed ? "⛔ Запретить" : "✓ Разрешить"}</button>}
@@ -1937,6 +2060,7 @@ function AdminPanel({ session }: { session: Session }) {
   const [message, setMessage] = useState("");
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [permissionsUserId, setPermissionsUserId] = useState<string | null>(null);
+  const [adminTab, setAdminTab] = useState<"users" | "integrations">("users");
 
   async function loadUsers() {
     setUsers(await api<User[]>("/users"));
@@ -2037,6 +2161,7 @@ function AdminPanel({ session }: { session: Session }) {
           can_view_all_calendars: form.get("can_view_all_calendars") === "on",
           can_access_admin: form.get("can_access_admin") === "on",
           can_access_chats: form.get("can_access_chats") === "on",
+          can_access_content: form.get("can_access_content") === "on",
         }),
       });
       setPermissionsUserId(null);
@@ -2049,6 +2174,11 @@ function AdminPanel({ session }: { session: Session }) {
 
   return (
     <section className="admin-panel admin-page-panel">
+      <nav className="admin-tabs" aria-label="Разделы админки">
+        <button className={adminTab === "users" ? "active" : ""} onClick={() => setAdminTab("users")}>Пользователи</button>
+        {(session.user.role === "owner" || session.user.role === "admin") && <button className={adminTab === "integrations" ? "active" : ""} onClick={() => setAdminTab("integrations")}>Интеграции и API</button>}
+      </nav>
+      {adminTab === "integrations" ? <IntegrationsPanel session={session} /> : <>
         <div className="section-heading"><div><p className="eyebrow">Управление студией</p><h2>Пользователи и права</h2></div><span>{users.length}</span></div>
         <div className="admin-users-content">
         <div className="user-list">
@@ -2076,6 +2206,7 @@ function AdminPanel({ session }: { session: Session }) {
                 <label><input type="checkbox" name="can_view_all_calendars" defaultChecked={user.can_view_all_calendars} />Просматривать все календари</label>
                 <label><input type="checkbox" name="can_access_admin" defaultChecked={user.can_access_admin} />Доступ к админке</label>
                 <label><input type="checkbox" name="can_access_chats" defaultChecked={user.can_access_chats} />Доступ к чатам</label>
+                <label><input type="checkbox" name="can_access_content" defaultChecked={user.can_access_content} />Доступ к контенту</label>
               </fieldset>
               <div className="user-edit-actions"><button className="primary" type="submit">Сохранить права</button><button className="quiet" type="button" onClick={() => setPermissionsUserId(null)}>Отмена</button></div>
             </form>}
@@ -2094,8 +2225,82 @@ function AdminPanel({ session }: { session: Session }) {
         </form>
         </details>
         </div>
+      </>}
     </section>
   );
+}
+
+function IntegrationsPanel({ session }: { session: Session }) {
+  const [status, setStatus] = useState<IntegrationStatus | null>(null);
+  const [message, setMessage] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function load() {
+    try {
+      setStatus(await api<IntegrationStatus>("/integrations"));
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : "Не удалось загрузить настройки интеграций");
+    }
+  }
+
+  useEffect(() => { void load(); }, []);
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    setSaving(true);
+    setMessage("");
+    try {
+      const next = await api<IntegrationStatus>("/integrations", {
+        method: "PUT",
+        headers: { "X-CSRF-Token": session.csrf_token },
+        body: JSON.stringify({
+          openai_api_key: form.get("openai_api_key") || null,
+          openai_model: form.get("openai_model") || null,
+          openai_image_model: form.get("openai_image_model") || null,
+          telegram_bot_token: form.get("telegram_bot_token") || null,
+          telegram_channel: form.get("telegram_channel") || null,
+          max_bot_token: form.get("max_bot_token") || null,
+          max_channel_id: form.get("max_channel_id") || null,
+          instagram_access_token: form.get("instagram_access_token") || null,
+          instagram_account_id: form.get("instagram_account_id") || null,
+        }),
+      });
+      setStatus(next);
+      event.currentTarget.reset();
+      setMessage("Настройки сохранены. Секреты не выводятся и остаются только на сервере.");
+    } catch (reason) {
+      setMessage(reason instanceof Error ? reason.message : "Не удалось сохранить настройки");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <div className="integrations-panel">
+    <div className="section-heading"><div><p className="eyebrow">Защищённые подключения</p><h2>Интеграции и API</h2><p>Доступ только владельцу и администраторам. Поля ключей всегда пустые: уже сохранённый ключ нельзя увидеть или скопировать через сайт.</p></div></div>
+    <form className="integrations-form" onSubmit={save} key={JSON.stringify(status)}>
+      <fieldset><legend>OpenAI — агент контента</legend><span className={status?.openai.configured ? "integration-status ready" : "integration-status"}>{status?.openai.configured ? "Ключ подключён" : "Ключ не задан"}</span>
+        <label>Новый API-ключ<input name="openai_api_key" type="password" autoComplete="new-password" placeholder="Оставьте пустым — ключ не изменится" /></label>
+        <label>Модель для текста<input name="openai_model" defaultValue={status?.openai.fields.model || "gpt-6-luna"} placeholder="gpt-6-luna" /></label>
+        <label>Модель для баннеров<input name="openai_image_model" defaultValue={status?.openai.fields.image_model || "gpt-image-2.5-sunburst"} placeholder="gpt-image-2.5-sunburst" /></label>
+      </fieldset>
+      <fieldset><legend>Telegram</legend><span className={status?.telegram.configured ? "integration-status ready" : "integration-status"}>{status?.telegram.configured ? "Подключено" : "Не подключено"}</span>
+        <label>Токен бота<input name="telegram_bot_token" type="password" autoComplete="new-password" placeholder="Оставьте пустым — токен не изменится" /></label>
+        <label>Канал или chat_id<input name="telegram_channel" defaultValue={status?.telegram.fields.channel} placeholder="@violettastudiya" /></label>
+      </fieldset>
+      <fieldset><legend>MAX</legend><span className={status?.max.configured ? "integration-status ready" : "integration-status"}>{status?.max.configured ? "Ключ сохранён" : "Не подключено"}</span>
+        <label>Токен бота / API-ключ<input name="max_bot_token" type="password" autoComplete="new-password" placeholder="Оставьте пустым — ключ не изменится" /></label>
+        <label>Канал или идентификатор<input name="max_channel_id" defaultValue={status?.max.fields.channel_id} /></label>
+      </fieldset>
+      <fieldset><legend>Instagram / Meta</legend><span className={status?.instagram.configured ? "integration-status ready" : "integration-status"}>{status?.instagram.configured ? "Ключ сохранён" : "Не подключено"}</span>
+        <label>Долгоживущий access token<input name="instagram_access_token" type="password" autoComplete="new-password" placeholder="Оставьте пустым — токен не изменится" /></label>
+        <label>ID Instagram business account<input name="instagram_account_id" defaultValue={status?.instagram.fields.account_id} /></label>
+      </fieldset>
+      <p className="integration-note">Telegram уже используется для публикации постов. MAX и Instagram готовы к безопасному сохранению реквизитов; подключение их публикации сделаем после получения их рабочих API.</p>
+      <button className="primary" disabled={saving}>{saving ? "Сохраняем…" : "Сохранить интеграции"}</button>
+      {message && <p className="form-message" aria-live="polite">{message}</p>}
+    </form>
+  </div>;
 }
 
 function signalNewMessage() {
@@ -2162,8 +2367,719 @@ function HeaderChatButton({ onOpen }: { onOpen: () => void }) {
   return <button className="header-chat" onClick={onOpen}><span aria-hidden="true">💬</span><b>Чаты</b>{unread > 0 && <i>{unread > 99 ? "99+" : unread}</i>}</button>;
 }
 
+const CONTENT_STATUS_LABELS: Record<ContentStatus, string> = {
+  draft: "Тема · черновик",
+  review: "Тема на согласовании",
+  approved: "Тема утверждена",
+  generating: "Агент готовит материалы",
+  ready: "Готово к публикации",
+  scheduled: "Запланирован",
+  published: "Опубликован",
+  failed: "Ошибка",
+};
+const CONTENT_PLATFORM_LABELS: Record<ContentPlatform, string> = {
+  telegram: "Telegram",
+  max: "MAX",
+  instagram: "Instagram",
+};
+
+function mondayFor(value: Date) {
+  const next = new Date(value);
+  next.setHours(0, 0, 0, 0);
+  const day = next.getDay() || 7;
+  next.setDate(next.getDate() - day + 1);
+  return next;
+}
+
+function dateInputValue(value: Date) {
+  const year = value.getFullYear();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function dateTimeLocalValue(value: Date) {
+  const hours = String(value.getHours()).padStart(2, "0");
+  const minutes = String(value.getMinutes()).padStart(2, "0");
+  return `${dateInputValue(value)}T${hours}:${minutes}`;
+}
+
+function nextContentSlot(now = new Date()) {
+  const next = new Date(now);
+  next.setSeconds(0, 0);
+  next.setMinutes(next.getMinutes() + 30);
+  const remainder = next.getMinutes() % 30;
+  if (remainder) next.setMinutes(next.getMinutes() + 30 - remainder);
+  return next;
+}
+
+function appendDictatedText(current: string, spoken: string) {
+  const prefix = current.trim();
+  const addition = spoken.replace(/\s+/g, " ").trim();
+  if (!addition) return current;
+  return prefix + (prefix ? " " : "") + addition;
+}
+
+function VoiceInputButton({
+  onAppend,
+  csrfToken,
+  disabled = false,
+  compact = false,
+}: {
+  onAppend: (spoken: string) => void;
+  csrfToken: string;
+  disabled?: boolean;
+  compact?: boolean;
+}) {
+  const [recording, setRecording] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [notice, setNotice] = useState("");
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const recordingTimerRef = useRef<number | null>(null);
+
+  function releaseMicrophone() {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+  }
+
+  function clearRecordingTimer() {
+    if (recordingTimerRef.current !== null) {
+      window.clearTimeout(recordingTimerRef.current);
+      recordingTimerRef.current = null;
+    }
+  }
+
+  useEffect(() => () => {
+    clearRecordingTimer();
+    if (recorderRef.current) {
+      recorderRef.current.onstop = null;
+      recorderRef.current.stop();
+      recorderRef.current = null;
+    }
+    releaseMicrophone();
+  }, []);
+
+  async function sendRecording(blob: Blob, mimeType: string) {
+    if (!blob.size) {
+      setNotice("Речь не услышана. Попробуйте говорить ближе к микрофону.");
+      return;
+    }
+    setTranscribing(true);
+    setNotice("Распознаю речь…");
+    try {
+      const extension = mimeType.includes("mp4") ? "m4a" : mimeType.includes("ogg") ? "ogg" : "webm";
+      const form = new FormData();
+      form.append("audio", new File([blob], `dictation.${extension}`, { type: mimeType || "audio/webm" }));
+      const result = await api<{ text: string }>("/content/transcribe", {
+        method: "POST",
+        headers: { "X-CSRF-Token": csrfToken },
+        body: form,
+      });
+      const spoken = result.text?.replace(/\s+/g, " ").trim();
+      if (!spoken) {
+        setNotice("Речь не удалось распознать. Попробуйте говорить ближе к микрофону.");
+        return;
+      }
+      onAppend(spoken);
+      setNotice("");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Не удалось расшифровать запись. Попробуйте ещё раз.");
+    } finally {
+      setTranscribing(false);
+    }
+  }
+
+  async function toggleListening() {
+    if (disabled || transcribing) return;
+    if (recording) {
+      const recorder = recorderRef.current;
+      if (recorder?.state === "recording") {
+        recorder.stop();
+        setNotice("Готовлю запись к расшифровке…");
+      }
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setNotice("Этот браузер не поддерживает запись с микрофона. Используйте микрофон на клавиатуре.");
+      return;
+    }
+    setNotice("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"]
+        .find((candidate) => MediaRecorder.isTypeSupported(candidate)) || "";
+      const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+      streamRef.current = stream;
+      recorderRef.current = recorder;
+      chunksRef.current = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size) chunksRef.current.push(event.data);
+      };
+      recorder.onerror = () => {
+        clearRecordingTimer();
+        setRecording(false);
+        releaseMicrophone();
+        setNotice("Не удалось записать голос. Закройте другое приложение с микрофоном и повторите.");
+      };
+      recorder.onstop = () => {
+        clearRecordingTimer();
+        const recordedMimeType = recorder.mimeType || mimeType || "audio/webm";
+        const blob = new Blob(chunksRef.current, { type: recordedMimeType });
+        recorderRef.current = null;
+        setRecording(false);
+        releaseMicrophone();
+        void sendRecording(blob, recordedMimeType);
+      };
+      recorder.start();
+      recordingTimerRef.current = window.setTimeout(() => {
+        if (recorder.state === "recording") {
+          setNotice("Запись остановлена через 90 секунд. Распознаю речь…");
+          recorder.stop();
+        }
+      }, 90_000);
+      setRecording(true);
+      setNotice("Говорите. Когда закончите, нажмите «Стоп».");
+    } catch (error) {
+      const name = error instanceof DOMException ? error.name : "";
+      const message = name === "NotAllowedError" || name === "SecurityError"
+        ? "Браузер запретил доступ к микрофону. Разрешите его для сайта и повторите."
+        : name === "NotFoundError"
+          ? "Микрофон не найден. Подключите его и повторите."
+          : "Не удалось включить микрофон. Проверьте разрешение и повторите.";
+      setNotice(message);
+      releaseMicrophone();
+    }
+  }
+
+  return <span className="voice-input-control">
+    <button
+      type="button"
+      className={"voice-input-button " + (recording ? "listening" : "")}
+      aria-pressed={recording}
+      disabled={disabled || transcribing}
+      onClick={toggleListening}
+      title="Надиктовать текст"
+    >
+      {recording ? "■ Стоп" : transcribing ? "Распознаю…" : compact ? "🎙" : "🎙 Надиктовать"}
+    </button>
+    {notice && <small className="voice-input-notice">{notice}</small>}
+  </span>;
+}
+
+function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { session: Session; initialMediaIds: string[]; onInitialMediaHandled: () => void }) {
+  const [weekStart, setWeekStart] = useState(() => mondayFor(new Date()));
+  const [items, setItems] = useState<ContentItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [createMode, setCreateMode] = useState<"day" | "week">("day");
+  const [newContentFormat, setNewContentFormat] = useState<ContentFormat>("post");
+  const [availabilityStaff, setAvailabilityStaff] = useState<AvailabilityStaff[]>([]);
+  const [contentLibrary, setContentLibrary] = useState<ContentLibraryMedia[]>([]);
+  const [contentLibraryFolders, setContentLibraryFolders] = useState<ContentLibraryWorkspace[]>([]);
+  const [contentLibraryWorkspaceId, setContentLibraryWorkspaceId] = useState("");
+  const [contentLibrarySearch, setContentLibrarySearch] = useState("");
+  const [contentLibraryNextOffset, setContentLibraryNextOffset] = useState<number | null>(null);
+  const [contentLibraryLoading, setContentLibraryLoading] = useState(false);
+  const [contentLibraryOpen, setContentLibraryOpen] = useState(false);
+  const [selectedSourceMedia, setSelectedSourceMedia] = useState<string[]>([]);
+  const [sourceImageEdit, setSourceImageEdit] = useState(false);
+  const [replacingMediaFor, setReplacingMediaFor] = useState<string | null>(null);
+  const [replacementMedia, setReplacementMedia] = useState<string[]>([]);
+  const [workingId, setWorkingId] = useState<string | null>(null);
+  const [newTitle, setNewTitle] = useState("");
+  const [newEditorInstruction, setNewEditorInstruction] = useState("");
+  const [refinementDialog, setRefinementDialog] = useState<{
+    item: ContentItem;
+    kind: "visual" | "selection";
+    text: string;
+  } | null>(null);
+  const [refinementError, setRefinementError] = useState("");
+  const [weekEntries, setWeekEntries] = useState<WeeklyContentEntry[]>([
+    { day: 0, title: "", content_format: "post", media_limit: 1, platforms: ["telegram"], platform_formats: { telegram: "post" } },
+  ]);
+
+  const weekEnd = new Date(weekStart);
+  weekEnd.setDate(weekEnd.getDate() + 6);
+
+  async function load() {
+    setLoading(true);
+    setError("");
+    try {
+      setItems(await api<ContentItem[]>(`/content/items?week_start=${dateInputValue(weekStart)}`));
+    } catch (requestError) {
+      setError((requestError as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { void load(); }, [weekStart]);
+  useEffect(() => { void api<AvailabilityStaff[]>("/content/availability/staff").then(setAvailabilityStaff).catch(() => setAvailabilityStaff([])); }, []);
+  useEffect(() => {
+    if (!initialMediaIds.length) return;
+    setSelectedSourceMedia(initialMediaIds);
+    setSourceImageEdit(true);
+    setCreating(true);
+    setCreateMode("day");
+    onInitialMediaHandled();
+  }, [initialMediaIds, onInitialMediaHandled]);
+  useEffect(() => {
+    if (selectedSourceMedia.length === 0) setSourceImageEdit(false);
+  }, [selectedSourceMedia.length]);
+
+  async function loadContentLibrary(options: { append?: boolean; workspaceId?: string; search?: string; offset?: number } = {}) {
+    const workspaceId = options.workspaceId ?? contentLibraryWorkspaceId;
+    const search = options.search ?? contentLibrarySearch;
+    const offset = options.offset ?? 0;
+    const params = new URLSearchParams({ limit: "60", offset: String(offset) });
+    if (workspaceId) params.set("workspace_id", workspaceId);
+    if (search.trim()) params.set("search", search.trim());
+    setContentLibraryLoading(true);
+    try {
+      const result = await api<ContentLibraryResult>(`/content/media-library?${params.toString()}`);
+      setContentLibrary((current) => options.append ? [...current, ...result.items] : result.items);
+      setContentLibraryFolders(result.workspaces);
+      setContentLibraryNextOffset(result.next_offset);
+    } catch {
+      setError("Не удалось открыть разрешённые материалы хранилища");
+    } finally {
+      setContentLibraryLoading(false);
+    }
+  }
+
+  async function openContentLibrary() {
+    setContentLibraryOpen(true);
+    await loadContentLibrary({ workspaceId: contentLibraryWorkspaceId, search: contentLibrarySearch });
+  }
+
+  function renderContentLibrary(selected: string[], setSelected: (update: (current: string[]) => string[]) => void, limit: number) {
+    return <>
+      <div className="content-library-tools">
+        <select value={contentLibraryWorkspaceId} onChange={(event) => { const value = event.target.value; setContentLibraryWorkspaceId(value); void loadContentLibrary({ workspaceId: value, search: contentLibrarySearch }); }}>
+          <option value="">Все доступные папки</option>
+          {contentLibraryFolders.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.kind === "private" ? "🔒 " : ""}{workspace.display_name}</option>)}
+        </select>
+        <input value={contentLibrarySearch} placeholder="Имя файла или комментарий" onChange={(event) => setContentLibrarySearch(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); void loadContentLibrary({ workspaceId: contentLibraryWorkspaceId, search: contentLibrarySearch }); } }} />
+        <button type="button" className="quiet" onClick={() => void loadContentLibrary({ workspaceId: contentLibraryWorkspaceId, search: contentLibrarySearch })}>Найти</button>
+      </div>
+      <div className="content-media-library">
+        {contentLibraryLoading && contentLibrary.length === 0 ? <p className="muted">Загружаю материалы…</p> : contentLibrary.length === 0 ? <p className="muted">Нет доступных материалов по этому фильтру.</p> : contentLibrary.map((media) => <label key={media.id} className={selected.includes(media.id) ? "selected" : ""}>
+          <input type="checkbox" checked={selected.includes(media.id)} onChange={() => setSelected((current) => current.includes(media.id) ? current.filter((id) => id !== media.id) : [...current, media.id].slice(0, limit))} />
+          <img src={media.thumbnail_url} alt="" />
+          <span>{media.media_type === "video" ? "🎬 Видео" : "Фото"} · {media.workspace_name}{media.content_marked ? " · ✦ контент" : ""}</span>
+          {media.comment && <small>{media.comment}</small>}
+        </label>)}
+      </div>
+      {contentLibraryNextOffset !== null && <button type="button" className="quiet content-library-more" disabled={contentLibraryLoading} onClick={() => void loadContentLibrary({ append: true, offset: contentLibraryNextOffset })}>{contentLibraryLoading ? "Загружаю…" : "Показать ещё"}</button>}
+    </>;
+  }
+
+  function changeWeek(days: number) {
+    const next = new Date(weekStart);
+    next.setDate(next.getDate() + days);
+    setWeekStart(next);
+  }
+
+  async function createItem(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const platforms = (["telegram", "max", "instagram"] as ContentPlatform[]).filter((platform) => form.get(platform) === "on");
+    const contentFormat = newContentFormat;
+    if (!platforms.length) {
+      setError("Выберите хотя бы одну площадку");
+      return;
+    }
+    setError("");
+    try {
+      const created = await api<ContentItem>("/content/items", {
+        method: "POST",
+        headers: { "X-CSRF-Token": session.csrf_token },
+        body: JSON.stringify({
+          title: contentFormat === "availability"
+            ? `${availabilityStaff.find((entry) => entry.staff_id === Number(form.get("availability_staff_id")))?.staff_name || "Мастер"} — свободные окна`
+            : String(form.get("title") || ""),
+          scheduled_at: new Date(String(form.get("scheduled_at"))).toISOString(),
+          platforms,
+          platform_formats: Object.fromEntries(platforms.map((platform) => [platform, platform === "max" ? "post" : contentFormat === "story" ? "story" : "post"])),
+          media_ids: selectedSourceMedia,
+          content_format: contentFormat,
+          media_limit: Number(form.get("media_limit") || 1),
+          availability_staff_id: contentFormat === "availability" ? Number(form.get("availability_staff_id") || 0) || null : null,
+          editor_instruction: String(form.get("editor_instruction") || "").trim() || null,
+          visual_edit_requested: sourceImageEdit,
+        }),
+      });
+      setWorkingId(created.id);
+      await api<ContentItem>(`/content/items/${created.id}/prepare`, {
+        method: "POST",
+        headers: { "X-CSRF-Token": session.csrf_token },
+      });
+      // The API determines whether a campaign visual is requested.  This
+      // avoids client-cache and Cyrillic-regex edge cases, and prevents a
+      // second paid image-generation call after the server has built it.
+      formElement.reset();
+      setNewTitle("");
+      setNewEditorInstruction("");
+      setNewContentFormat("post");
+      setSelectedSourceMedia([]);
+      setSourceImageEdit(false);
+      setContentLibraryOpen(false);
+      setCreating(false);
+      await load();
+    } catch (requestError) {
+      setError((requestError as Error).message);
+      // When preparation fails (for example because YCLIENTS has no free
+      // hour-long slots), the server preserves a failed card with a clear
+      // reason. Load it at once so the action never appears to do nothing.
+      await load();
+    } finally {
+      setWorkingId(null);
+    }
+  }
+
+  async function createWeek(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
+    const readyEntries = weekEntries.filter((entry) => entry.title.trim());
+    if (!readyEntries.length) { setError("Добавьте хотя бы одну тему"); return; }
+    if (readyEntries.some((entry) => entry.platforms.length === 0)) {
+      setError("Выберите хотя бы одну площадку в каждой строке плана");
+      return;
+    }
+    let nextAutomaticSlot = nextContentSlot();
+    const itemsForWeek = readyEntries.map((entry, index) => {
+      const scheduledAt = new Date(weekStart);
+      scheduledAt.setDate(scheduledAt.getDate() + entry.day);
+      scheduledAt.setHours(10 + (index % 3), 0, 0, 0);
+      if (scheduledAt < nextAutomaticSlot) {
+        scheduledAt.setTime(nextAutomaticSlot.getTime());
+        nextAutomaticSlot = new Date(nextAutomaticSlot.getTime() + 30 * 60 * 1000);
+      }
+      return {
+        title: entry.title.trim(),
+        scheduled_at: scheduledAt.toISOString(),
+        platforms: entry.platforms,
+        platform_formats: entry.platform_formats,
+        media_ids: [],
+        content_format: entry.content_format,
+        media_limit: entry.media_limit,
+      };
+    });
+    setError("");
+    try {
+      await api<ContentItem[]>("/content/items/bulk", {
+        method: "POST",
+        headers: { "X-CSRF-Token": session.csrf_token },
+        body: JSON.stringify({ items: itemsForWeek }),
+      });
+      formElement.reset();
+      setWeekEntries([{ day: 0, title: "", content_format: "post", media_limit: 1, platforms: ["telegram"], platform_formats: { telegram: "post" } }]);
+      setCreating(false);
+      await load();
+    } catch (requestError) {
+      setError((requestError as Error).message);
+    }
+  }
+
+  async function setStatus(item: ContentItem, status: ContentStatus) {
+    setError("");
+    setWorkingId(item.id);
+    try {
+      await api<ContentItem>(`/content/items/${item.id}`, {
+        method: "PATCH",
+        headers: { "X-CSRF-Token": session.csrf_token },
+        body: JSON.stringify({ status }),
+      });
+      await load();
+    } catch (requestError) {
+      setError((requestError as Error).message);
+    } finally {
+      setWorkingId(null);
+    }
+  }
+
+  async function rollbackToDraft(item: ContentItem) {
+    setError("");
+    setWorkingId(item.id);
+    try {
+      // Keep the prepared text and selected media intact.  This is a safe
+      // planning undo: it only removes the approval/scheduled state and never
+      // publishes or deletes anything.
+      await api<ContentItem>(`/content/items/${item.id}/rollback`, {
+        method: "POST",
+        headers: { "X-CSRF-Token": session.csrf_token },
+      });
+      await load();
+    } catch (requestError) {
+      setError((requestError as Error).message);
+    } finally {
+      setWorkingId(null);
+    }
+  }
+
+  async function remove(item: ContentItem) {
+    if (!window.confirm(`Удалить «${item.title}» из плана?`)) return;
+    try {
+      await api<void>(`/content/items/${item.id}`, {
+        method: "DELETE",
+        headers: { "X-CSRF-Token": session.csrf_token },
+      });
+      await load();
+    } catch (requestError) {
+      setError((requestError as Error).message);
+    }
+  }
+
+  async function prepare(item: ContentItem) {
+    setError("");
+    setWorkingId(item.id);
+    try {
+      await api<ContentItem>(`/content/items/${item.id}/prepare`, {
+        method: "POST",
+        headers: { "X-CSRF-Token": session.csrf_token },
+      });
+      await load();
+    } catch (requestError) {
+      setError((requestError as Error).message);
+    } finally {
+      setWorkingId(null);
+    }
+  }
+
+  async function openManualMediaPicker(item: ContentItem) {
+    setError("");
+    // Keep the original selected material when available. Generated banner IDs
+    // live only in a publication and are deliberately not reused as sources.
+    setReplacementMedia(item.media_ids.slice(0, item.media_limit));
+    setReplacingMediaFor(item.id);
+    await loadContentLibrary();
+  }
+
+  async function saveManualMediaPicker(item: ContentItem) {
+    if (!replacementMedia.length) {
+      setError("Выберите хотя бы один фото- или видеоматериал");
+      return;
+    }
+    setError("");
+    setWorkingId(item.id);
+    try {
+      await api<ContentItem>(`/content/items/${item.id}`, {
+        method: "PATCH",
+        headers: { "X-CSRF-Token": session.csrf_token },
+        body: JSON.stringify({ media_ids: replacementMedia, status: "draft" }),
+      });
+      await api<ContentItem>(`/content/items/${item.id}/prepare`, {
+        method: "POST",
+        headers: { "X-CSRF-Token": session.csrf_token },
+      });
+      setReplacingMediaFor(null);
+      setReplacementMedia([]);
+      await load();
+    } catch (requestError) {
+      setError((requestError as Error).message);
+    } finally {
+      setWorkingId(null);
+    }
+  }
+
+  async function publishTelegram(item: ContentItem) {
+    if (!window.confirm("Опубликовать подготовленный материал в Telegram сейчас?")) return;
+    setError("");
+    setWorkingId(item.id);
+    try {
+      await api<ContentItem>(`/content/items/${item.id}/publications/telegram`, {
+        method: "POST",
+        headers: { "X-CSRF-Token": session.csrf_token },
+      });
+      await load();
+    } catch (requestError) {
+      setError((requestError as Error).message);
+    } finally {
+      setWorkingId(null);
+    }
+  }
+
+  async function publishInstagram(item: ContentItem) {
+    if (!window.confirm("Опубликовать подготовленный материал в Instagram сейчас? Файл будет временно доступен Meta только на время публикации.")) return;
+    setError("");
+    setWorkingId(item.id);
+    try {
+      await api<ContentItem>(`/content/items/${item.id}/publications/instagram`, {
+        method: "POST",
+        headers: { "X-CSRF-Token": session.csrf_token },
+      });
+      await load();
+    } catch (requestError) {
+      setError((requestError as Error).message);
+    } finally {
+      setWorkingId(null);
+    }
+  }
+
+  async function changeCaption(item: ContentItem, publication: ContentPublication) {
+    const next = window.prompt("Измените подпись к публикации", publication.caption || "");
+    if (next === null || !next.trim()) return;
+    setError("");
+    setWorkingId(item.id);
+    try {
+      await api<ContentItem>(`/content/items/${item.id}/publications/${publication.platform}/caption`, {
+        method: "PATCH",
+        headers: { "X-CSRF-Token": session.csrf_token },
+        body: JSON.stringify({ caption: next.trim() }),
+      });
+      await load();
+    } catch (requestError) {
+      setError((requestError as Error).message);
+    } finally {
+      setWorkingId(null);
+    }
+  }
+
+  function openRefinementDialog(item: ContentItem, kind: "visual" | "selection") {
+    setError("");
+    setRefinementError("");
+    // The dialog starts empty on purpose. It adds a new note to the stored
+    // brief instead of inviting the editor to overwrite the original request.
+    setRefinementDialog({ item, kind, text: "" });
+  }
+
+  async function submitRefinement(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const dialog = refinementDialog;
+    if (!dialog) return;
+    const next = dialog.text.trim();
+    if (next.length < 2) {
+      setRefinementError("Добавьте короткое уточнение или надиктуйте его.");
+      return;
+    }
+    setError("");
+    setRefinementError("");
+    setWorkingId(dialog.item.id);
+    try {
+      if (dialog.kind === "visual") {
+        await api<ContentItem>("/content/items/" + dialog.item.id + "/visual", {
+          method: "POST",
+          headers: { "X-CSRF-Token": session.csrf_token },
+          body: JSON.stringify({ instruction: next, source_media_ids: dialog.item.media_ids }),
+        });
+      } else {
+        await api<ContentItem>("/content/items/" + dialog.item.id, {
+          method: "PATCH",
+          headers: { "X-CSRF-Token": session.csrf_token },
+          body: JSON.stringify({ editor_instruction: next, append_editor_instruction: true }),
+        });
+        await api<ContentItem>("/content/items/" + dialog.item.id + "/prepare", {
+          method: "POST",
+          headers: { "X-CSRF-Token": session.csrf_token },
+        });
+      }
+      setRefinementDialog(null);
+      await load();
+    } catch (requestError) {
+      setRefinementError((requestError as Error).message);
+    } finally {
+      setWorkingId(null);
+    }
+  }
+
+  async function changeAvailabilityMaster(item: ContentItem) {
+    const choices = availabilityStaff.map((entry) => `${entry.staff_id} — ${entry.staff_name}${entry.specialization ? ` (${entry.specialization})` : ""}`).join("\n");
+    const answer = window.prompt(`Введите номер мастера:\n${choices}`, item.availability_staff_id ? String(item.availability_staff_id) : "");
+    const staffId = Number(answer);
+    if (!answer || !availabilityStaff.some((entry) => entry.staff_id === staffId)) return;
+    setWorkingId(item.id); setError("");
+    try {
+      await api<ContentItem>(`/content/items/${item.id}`, { method: "PATCH", headers: { "X-CSRF-Token": session.csrf_token }, body: JSON.stringify({ availability_staff_id: staffId, status: "draft" }) });
+      await prepare({ ...item, status: "draft" });
+    } finally { setWorkingId(null); }
+  }
+
+  const grouped = items.reduce<Record<string, ContentItem[]>>((result, item) => {
+    const key = dateInputValue(new Date(item.scheduled_at));
+    (result[key] ||= []).push(item);
+    return result;
+  }, {});
+  const formatter = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" });
+  const firstContentSlot = nextContentSlot();
+  const defaultSchedule = new Date(weekStart);
+  defaultSchedule.setHours(10, 0, 0, 0);
+  if (defaultSchedule < firstContentSlot) defaultSchedule.setTime(firstContentSlot.getTime());
+
+  return <section className="content-planner">
+    <div className="section-heading content-heading"><div><p className="eyebrow">Контент студии</p><h1>Темы на неделю</h1><p>Вы согласуете только темы. После утверждения плана агент заранее подберёт материалы, прочитает комментарии, подготовит тексты для трёх площадок и будет публиковать их по расписанию.</p></div><span>{items.length}</span></div>
+    <div className="content-week-bar"><button type="button" onClick={() => changeWeek(-7)}>←</button><strong>{formatter.format(weekStart)} — {formatter.format(weekEnd)}</strong><button type="button" onClick={() => changeWeek(7)}>→</button></div>
+    <div className="content-summary"><div><b>{items.length}</b><span>тем в плане</span></div><div><b>{items.filter((item) => ["approved", "generating", "ready", "scheduled", "published"].includes(item.status)).length}</b><span>тем утверждено</span></div><div><b>{items.filter((item) => ["ready", "scheduled", "published"].includes(item.status)).length}</b><span>материалов готово</span></div><small>После согласования агент готовит всю неделю заранее</small></div>
+    <button type="button" className="content-create-toggle" onClick={() => setCreating((value) => !value)}>＋ Добавить тему</button>
+    {creating && <div className="content-create-box"><div className="content-create-tabs"><button type="button" className={createMode === "day" ? "active" : ""} onClick={() => setCreateMode("day")}>На день</button><button type="button" className={createMode === "week" ? "active" : ""} onClick={() => setCreateMode("week")}>На всю неделю</button></div>
+    {createMode === "day" ? <form className="content-create-form" onSubmit={createItem}>
+      <fieldset className="content-format-choice"><legend>Что готовим</legend><label><input type="radio" name="content_format" value="post" checked={newContentFormat === "post"} onChange={() => setNewContentFormat("post")} />Пост</label><label><input type="radio" name="content_format" value="story" checked={newContentFormat === "story"} onChange={() => setNewContentFormat("story")} />История</label><label><input type="radio" name="content_format" value="availability" checked={newContentFormat === "availability"} onChange={() => setNewContentFormat("availability")} />Свободные окна</label></fieldset>
+      {newContentFormat !== "availability" && <label>{sourceImageEdit ? "Результат обработки" : "Тема"}<div className="voice-input-row"><input name="title" minLength={2} maxLength={180} required value={newTitle} onChange={(event) => setNewTitle(event.target.value)} placeholder={sourceImageEdit ? "Например, ретушь результата перманента губ" : "Например, результат процедуры до/после"} /><VoiceInputButton csrfToken={session.csrf_token} onAppend={(spoken) => setNewTitle((current) => appendDictatedText(current, spoken))} /></div><small className="muted">Можно надиктовать тему: нажмите «Стоп», и текст появится в поле.</small></label>}
+      {newContentFormat === "availability" && <label>Мастер для окон<select name="availability_staff_id" required defaultValue=""><option value="" disabled>Выберите мастера</option>{availabilityStaff.map((entry) => <option key={entry.staff_id} value={entry.staff_id}>{entry.staff_name}{entry.specialization ? ` — ${entry.specialization}` : ""}</option>)}</select><small className="muted">Будет использован только шаблон, в комментарии к которому указан этот мастер.</small></label>}
+      {newContentFormat !== "availability" && <><label>{sourceImageEdit ? "Что изменить на фото" : "Уточнение для агента"} <small className="muted">необязательно</small><textarea name="editor_instruction" maxLength={1000} value={newEditorInstruction} onChange={(event) => setNewEditorInstruction(event.target.value)} placeholder={sourceImageEdit ? "Например: «Убери маску, добавь чёрные перчатки, сделай мягкую ретушь. Добавь золотую надпись и логотип VIOLETTA»." : "Например: «сгенерируй видео о процедуре», «сгенерируй картинку в тёмной золотой стилистике»."} /><div className="voice-input-row"><VoiceInputButton csrfToken={session.csrf_token} onAppend={(spoken) => setNewEditorInstruction((current) => appendDictatedText(current, spoken))} /></div><small className="muted">Новое уточнение дополняет тему и сохраняется вместе с ней.</small></label><div className="content-source-picker"><div><strong>Фото и видео из хранилища</strong><small>{selectedSourceMedia.length ? "Выбрано: " + selectedSourceMedia.length : "Необязательно: агент подберёт разрешённые материалы сам."}</small></div><button type="button" className="quiet" onClick={() => void openContentLibrary()}>Выбрать материалы</button></div>{selectedSourceMedia.length > 0 && <section className="source-image-edit"><label><input type="checkbox" checked={sourceImageEdit} onChange={(event) => setSourceImageEdit(event.target.checked)} /> <span><strong>Обработать выбранное фото с ИИ</strong><small>Создаст новую версию: можно ретушировать, добавить или убрать детали, добавить надписи и логотип. Оригинал останется без изменений.</small></span></label></section>}{contentLibraryOpen && renderContentLibrary(selectedSourceMedia, setSelectedSourceMedia, 10)}</>}
+      <label>Фото в посте<select name="media_limit" defaultValue="1"><option value="1">1 фото</option><option value="2">2 фото</option><option value="3">3 фото</option><option value="4">4 фото</option><option value="5">5 фото</option><option value="6">6 фото</option><option value="7">7 фото</option><option value="8">8 фото</option><option value="9">9 фото</option><option value="10">10 фото</option></select><small className="muted">Для истории агент возьмёт один вертикальный материал; для «Свободных окон» — макет из папки «Шаблоны».</small></label>
+      <label>Дата и время<input name="scheduled_at" type="datetime-local" required min={dateTimeLocalValue(firstContentSlot)} defaultValue={dateTimeLocalValue(defaultSchedule)} /><small className="muted">Только будущее время. На подготовку материала автоматически заложено не менее 30 минут.</small></label>
+      <fieldset><legend>Площадки</legend><label><input type="checkbox" name="telegram" defaultChecked />Telegram</label><label><input type="checkbox" name="max" />MAX</label><label><input type="checkbox" name="instagram" />Instagram</label></fieldset>
+      <div className="content-form-actions"><button type="submit" disabled={workingId !== null}>{workingId ? "Генерирую…" : newContentFormat === "availability" ? "Сгенерировать окна" : sourceImageEdit ? "Обработать фото ИИ" : "Сгенерировать контент"}</button><button type="button" className="quiet" onClick={() => setCreating(false)}>Отмена</button></div>
+    </form> : <form className="content-create-form" onSubmit={createWeek}>
+      <div className="weekly-content-entries"><strong>План публикаций</strong><p className="muted">Каждая строка — отдельная публикация. Выберите площадки и формат именно для этой публикации: пост или история. В один день можно добавить несколько материалов с разными посылами и форматами.</p>{weekEntries.map((entry, index) => <div className="weekly-content-entry" key={index}><div className="weekly-entry-main"><select aria-label="День недели" value={entry.day} onChange={(event) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, day: Number(event.target.value) } : item))}>{["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"].map((label, day) => <option key={label} value={day}>{label}</option>)}</select><div className="weekly-topic-field"><input value={entry.title} onChange={(event) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, title: event.target.value } : item))} placeholder="Тема или посыл" required /><VoiceInputButton csrfToken={session.csrf_token} compact onAppend={(spoken) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, title: appendDictatedText(item.title, spoken) } : item))} /></div><select aria-label="Основной макет" value={entry.content_format} onChange={(event) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, content_format: event.target.value as ContentFormat } : item))}><option value="post">Макет поста</option><option value="story">Вертикальный макет</option><option value="availability">Окна</option></select><select aria-label="Количество фото" value={entry.media_limit} onChange={(event) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, media_limit: Number(event.target.value) } : item))}>{[1,2,3,4,5,6,7,8,9,10].map((count) => <option key={count} value={count}>{count} фото</option>)}</select>{weekEntries.length > 1 && <button type="button" className="quiet" aria-label="Удалить строку" onClick={() => setWeekEntries((items) => items.filter((_, position) => position !== index))}>×</button>}</div><div className="weekly-platform-formats">{(["telegram", "instagram", "max"] as ContentPlatform[]).map((platform) => { const selected = entry.platforms.includes(platform); const format = entry.platform_formats[platform] || "post"; const title = platform === "telegram" ? "Telegram" : platform === "instagram" ? "Instagram" : "MAX"; return <label key={platform} className={selected ? "selected" : ""}><span><input type="checkbox" checked={selected} onChange={() => setWeekEntries((items) => items.map((item, position) => { if (position !== index) return item; const platforms = selected ? item.platforms.filter((value) => value !== platform) : [...item.platforms, platform]; const platform_formats = { ...item.platform_formats }; if (!selected) platform_formats[platform] = platform === "max" ? "post" : item.content_format === "story" ? "story" : "post"; return { ...item, platforms, platform_formats }; }))} />{title}</span>{platform === "max" ? <small>Пост</small> : <select aria-label={`${title}: формат`} disabled={!selected} value={format === "reel" ? "story" : format} onChange={(event) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, platform_formats: { ...item.platform_formats, [platform]: event.target.value as PublicationFormat } } : item))}><option value="post">Пост</option><option value="story">История</option></select>}</label>; })}</div></div>)}<button type="button" className="quiet weekly-add" onClick={() => setWeekEntries((items) => [...items, { day: 0, title: "", content_format: "post", media_limit: 1, platforms: ["telegram"], platform_formats: { telegram: "post" } }])}>＋ Ещё публикация</button></div>
+      <div className="content-form-actions"><button type="submit">Добавить весь план</button><button type="button" className="quiet" onClick={() => setCreating(false)}>Отмена</button></div>
+    </form>}</div>}
+    {error && <p className="error">{error}</p>}
+    {loading ? <p className="muted">Загружаю план…</p> : items.length === 0 ? <div className="content-empty"><strong>На эту неделю тем пока нет</strong><span>Добавьте и согласуйте темы. После подключения OpenAI агент подготовит по ним готовые публикации заранее.</span></div> : <div className="content-days">
+      {Object.entries(grouped).map(([day, dayItems]) => <section className="content-day" key={day}><h2>{new Intl.DateTimeFormat("ru-RU", { weekday: "long", day: "numeric", month: "long" }).format(new Date(`${day}T12:00:00`))}<span>{dayItems.length}</span></h2><div className="content-cards">{dayItems.map((item) => <article className="content-card" key={item.id}>
+        <div className="content-card-time"><strong>{new Date(item.scheduled_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}</strong><span className={`content-status ${item.status}`}>{CONTENT_STATUS_LABELS[item.status]}</span></div>
+        <h3>{item.title}</h3><p className={`content-format-tag ${item.content_format}`}>{item.content_format === "post" ? `Пост · до ${item.media_limit} фото` : item.content_format === "story" ? "История · вертикальный макет" : "Свободные окна · шаблон"}</p>{item.editor_instruction && <p className="content-editor-instruction">Уточнение: {item.editor_instruction}</p>}{item.caption && <p>{item.caption}</p>}
+        <div className="content-platforms">{item.publications.map((publication) => <span key={publication.id} className={`${publication.platform} ${publication.status}`}>{CONTENT_PLATFORM_LABELS[publication.platform]} · {publication.publication_format === "story" ? "история" : publication.publication_format === "reel" ? "Reels" : "пост"}</span>)}</div>
+        {item.publications.some((publication) => publication.caption) && <div className="content-generated-texts">{item.publications.filter((publication) => publication.caption).map((publication) => { const isStory = item.content_format === "story" || publication.publication_format === "story"; return <section key={publication.id} className={`content-post-preview ${isStory || item.content_format === "availability" ? "story-preview" : ""}`}><div className="content-post-preview-head"><span>{CONTENT_PLATFORM_LABELS[publication.platform]} · предпросмотр</span><small>{isStory ? "история" : item.content_format === "availability" ? "свободные окна на макете" : publication.media_ids.length ? `${publication.media_ids.length} файл(а)` : "текстовый пост"}</small></div>{publication.media_ids.length > 0 && <div className={`content-post-preview-media count-${isStory || item.content_format === "availability" ? 1 : Math.min(publication.media_ids.length, 4)}`}>{publication.media_ids.slice(0, isStory || item.content_format === "availability" ? 1 : 4).map((mediaId, index) => <div className="content-post-preview-file" key={mediaId}><img src={`/api/v1/media/${mediaId}/thumbnail`} alt={`Материал ${index + 1}`} />{isStory && <b className="story-overlay">{item.title}</b>}{index === 3 && publication.media_ids.length > 4 && <b>+{publication.media_ids.length - 4}</b>}</div>)}</div>}<p>{publication.caption}</p>{publication.error && <small className="error">{publication.error}</small>}</section>; })}</div>}
+        {replacingMediaFor === item.id && <section className="content-card-media-editor">
+          <div><strong>Сменить материалы</strong><small>Выберите до {item.media_limit} фото или видео. После сохранения агент заново подготовит текст и предпросмотр.</small></div>
+          {renderContentLibrary(replacementMedia, setReplacementMedia, item.media_limit)}
+          <div className="content-form-actions"><button type="button" disabled={workingId === item.id} onClick={() => void saveManualMediaPicker(item)}>{workingId === item.id ? "Сохраняю…" : "Сохранить материалы"}</button><button type="button" className="quiet" disabled={workingId === item.id} onClick={() => { setReplacingMediaFor(null); setReplacementMedia([]); }}>Отмена</button></div>
+        </section>}
+        <div className="content-card-actions">
+          {["draft", "review", "approved"].includes(item.status) && <button type="button" disabled={workingId === item.id} onClick={() => void prepare(item)}>{workingId === item.id ? "Генерирую…" : item.content_format === "availability" ? "Сгенерировать окна" : "Сгенерировать контент"}</button>}
+          {item.status === "failed" && item.publications.some((publication) => publication.platform === "telegram") && <button type="button" disabled={workingId === item.id} onClick={() => void prepare(item)}>{workingId === item.id ? "Генерирую…" : item.content_format === "availability" ? "Повторить сборку окон" : "Повторить генерацию"}</button>}
+          {item.status === "ready" && item.publications.some((publication) => publication.caption) && <>
+            {item.content_format === "availability" && <button type="button" className="quiet" disabled={workingId === item.id} onClick={() => void changeAvailabilityMaster(item)}>Сменить мастера</button>}
+            <button type="button" disabled={workingId === item.id} onClick={() => void setStatus(item, "scheduled")}>{workingId === item.id ? "Утверждаю…" : "✓ Утвердить"}</button>
+            <button type="button" className="quiet" disabled={workingId === item.id} onClick={() => void changeCaption(item, item.publications.find((publication) => publication.caption)!)}>Сменить подпись</button>
+            {item.content_format !== "availability" && <button type="button" className="quiet" disabled={workingId === item.id} onClick={() => openRefinementDialog(item, "visual")}>Уточнить картинку</button>}
+            <button type="button" className="quiet" disabled={workingId === item.id} onClick={() => openRefinementDialog(item, "selection")}>Уточнить подбор</button>
+            <button type="button" className="quiet" disabled={workingId === item.id} onClick={() => void openManualMediaPicker(item)}>Сменить фото</button>
+          </>}
+          {item.status === "scheduled" && item.publications.some((publication) => publication.caption) && <>
+            <button type="button" className="quiet" disabled={workingId === item.id} onClick={() => void rollbackToDraft(item)}>{workingId === item.id ? "Откатываю…" : "↶ В черновик"}</button>
+            <button type="button" className="quiet" disabled={workingId === item.id} onClick={() => void openManualMediaPicker(item)}>Сменить фото/видео</button>
+            {item.publications.some((publication) => publication.platform === "telegram" && publication.caption && publication.status !== "published") && <button type="button" disabled={workingId === item.id} onClick={() => void publishTelegram(item)}>{workingId === item.id ? "Публикую…" : "Опубликовать в Telegram"}</button>}
+            {item.publications.some((publication) => publication.platform === "instagram" && publication.caption && publication.status !== "published") && <button type="button" disabled={workingId === item.id} onClick={() => void publishInstagram(item)}>{workingId === item.id ? "Публикую…" : "Опубликовать в Instagram"}</button>}
+          </>}
+          {["draft", "review", "approved", "ready", "failed"].includes(item.status) && <button type="button" className="quiet" onClick={() => void remove(item)}>Удалить</button>}
+        </div>
+      </article>)}</div></section>)}
+    </div>}
+    {refinementDialog && <div className="content-refinement-overlay" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target && workingId !== refinementDialog.item.id) setRefinementDialog(null); }}>
+      <form className="content-refinement-dialog" role="dialog" aria-modal="true" aria-labelledby="content-refinement-title" onSubmit={submitRefinement}>
+        <div>
+          <p className="eyebrow">Сохранить контекст</p>
+          <h2 id="content-refinement-title">{refinementDialog.kind === "visual" ? "Уточнить картинку" : "Уточнить подбор материалов"}</h2>
+          <p className="muted">Новое уточнение добавится к исходной теме и прежним правкам — они не будут заменены.</p>
+        </div>
+        <label>Новое уточнение<textarea autoFocus value={refinementDialog.text} maxLength={1000} onChange={(event) => setRefinementDialog((current) => current ? { ...current, text: event.target.value } : current)} placeholder={refinementDialog.kind === "visual" ? "Например: «Цену 4 000 ₽ сделать крупнее и по центру нижнего золотого блока»." : "Например: «Только глаза со стрелками, без губ и пирсинга»."} /></label>
+        <div className="voice-input-row voice-input-row-solo"><VoiceInputButton csrfToken={session.csrf_token} onAppend={(spoken) => setRefinementDialog((current) => current ? { ...current, text: appendDictatedText(current.text, spoken) } : current)} disabled={workingId === refinementDialog.item.id} /></div>
+        {refinementError && <p className="error">{refinementError}</p>}
+        <div className="content-form-actions"><button type="submit" disabled={workingId === refinementDialog.item.id}>{workingId === refinementDialog.item.id ? "Генерирую…" : refinementDialog.kind === "visual" ? "Сгенерировать заново" : "Уточнить подбор"}</button><button type="button" className="quiet" disabled={workingId === refinementDialog.item.id} onClick={() => setRefinementDialog(null)}>Отмена</button></div>
+      </form>
+    </div>}
+  </section>;
+}
+
 function Dashboard({ session, onLogout }: { session: Session; onLogout: () => void }) {
-  type Screen = "main" | "chats" | "admin";
+  type Screen = "main" | "chats" | "admin" | "content";
   type MediaMode = "add" | "browse";
   const mediaModeStorageKey = `vita29-media-mode:${session.user.id}`;
   const mediaModeFromLocation = (): MediaMode => {
@@ -2175,11 +3091,13 @@ function Dashboard({ session, onLogout }: { session: Session; onLogout: () => vo
   const screenFromHash = (): Screen => {
     if (window.location.hash === "#chats" && session.user.can_access_chats) return "chats";
     if (window.location.hash === "#admin" && session.user.can_access_admin) return "admin";
+    if (window.location.hash === "#content" && session.user.can_access_content) return "content";
     return "main";
   };
   const [screen, setScreen] = useState<Screen>(screenFromHash);
   const [mediaMode, setMediaMode] = useState<MediaMode>(mediaModeFromLocation);
   const [chatMediaId, setChatMediaId] = useState<string | null>(null);
+  const [contentMediaIds, setContentMediaIds] = useState<string[]>([]);
 
   useEffect(() => {
     const handleNavigation = () => {
@@ -2202,6 +3120,12 @@ function Dashboard({ session, onLogout }: { session: Session; onLogout: () => vo
     setScreen("admin");
   }
 
+  function openContent(files: Media[] = []) {
+    setContentMediaIds(files.map((file) => file.id));
+    if (window.location.hash !== "#content") window.history.pushState({ screen: "content" }, "", "#content");
+    setScreen("content");
+  }
+
   function switchMediaMode(mode: MediaMode) {
     const hash = mode === "add" ? "#add" : "#browse";
     localStorage.setItem(mediaModeStorageKey, mode);
@@ -2212,7 +3136,7 @@ function Dashboard({ session, onLogout }: { session: Session; onLogout: () => vo
 
   function closePage() {
     setChatMediaId(null);
-    if (["#chats", "#admin"].includes(window.location.hash)) window.history.back();
+    if (["#chats", "#admin", "#content"].includes(window.location.hash)) window.history.back();
     else setScreen("main");
   }
 
@@ -2223,8 +3147,8 @@ function Dashboard({ session, onLogout }: { session: Session; onLogout: () => vo
 
   return (
     <main className="app-shell">
-      <header><div className="brand"><img className="mini-mark" src="/logo.svg" alt="" /><div><strong>VIOLETTA</strong><small>{screen === "chats" ? "чаты студии" : screen === "admin" ? "администрирование" : mediaMode === "add" ? "добавление материалов" : "просмотр архива"}</small></div></div><div className="header-actions">{screen !== "main" ? <button className="header-back" onClick={closePage}>← Назад</button> : <>{session.user.can_access_admin && <button className="header-admin" onClick={openAdmin}><span aria-hidden="true">⚙</span><b>Админка</b></button>}{session.user.can_access_chats && <HeaderChatButton onOpen={() => openChats()} />}</>}<button className="quiet" onClick={logout}>Выйти</button></div></header>
-      {screen === "chats" ? <div className="content chat-page"><DiscussionsPanel session={session} initialMediaId={chatMediaId} onInitialMediaHandled={() => setChatMediaId(null)} /></div> : screen === "admin" ? <div className="content admin-page"><AdminPanel session={session} /></div> : <div className="content">
+      <header><div className="brand"><img className="mini-mark" src="/logo.svg" alt="" /><div><strong>VIOLETTA</strong><small>{screen === "chats" ? "чаты студии" : screen === "admin" ? "администрирование" : screen === "content" ? "контент студии" : mediaMode === "add" ? "добавление материалов" : "просмотр архива"}</small></div></div><div className="header-actions">{screen !== "main" ? <button className="header-back" onClick={closePage}>← Назад</button> : <>{session.user.can_access_content && <button className="header-content" onClick={() => openContent()}><span aria-hidden="true">✦</span><b>Контент</b></button>}{session.user.can_access_admin && <button className="header-admin" onClick={openAdmin}><span aria-hidden="true">⚙</span><b>Админка</b></button>}{session.user.can_access_chats && <HeaderChatButton onOpen={() => openChats()} />}</>}<button className="quiet" onClick={logout}>Выйти</button></div></header>
+      {screen === "chats" ? <div className="content chat-page"><DiscussionsPanel session={session} initialMediaId={chatMediaId} onInitialMediaHandled={() => setChatMediaId(null)} /></div> : screen === "admin" ? <div className="content admin-page"><AdminPanel session={session} /></div> : screen === "content" ? <div className="content content-page"><ContentPanel session={session} initialMediaIds={contentMediaIds} onInitialMediaHandled={() => setContentMediaIds([])} /></div> : <div className="content">
         <section className="welcome"><p className="eyebrow">Добро пожаловать</p><h1>{session.user.display_name}</h1><p>Рабочие папки открыты для команды, а приватные — только для приглашённых участников.</p></section>
         <StoragePanel />
         <AccountPanel session={session} />
@@ -2232,7 +3156,7 @@ function Dashboard({ session, onLogout }: { session: Session; onLogout: () => vo
           {session.user.can_upload_media && <button className={`media-page-link add ${mediaMode === "add" ? "active" : ""}`} type="button" aria-pressed={mediaMode === "add"} onClick={() => switchMediaMode("add")}><span className="media-link-icon" aria-hidden="true">＋</span><span><small>Новые материалы</small><strong>Добавить фото и видео</strong><em>Выбрать папку, дату и визит YCLIENTS</em></span><b aria-hidden="true">↓</b></button>}
           <button className={`media-page-link browse ${mediaMode === "browse" ? "active" : ""}`} type="button" aria-pressed={mediaMode === "browse"} onClick={() => switchMediaMode("browse")}><span className="media-link-icon" aria-hidden="true">▦</span><span><small>Архив студии</small><strong>Просмотр материалов</strong><em>Папки, календарь, клиенты, даты и геометки</em></span><b aria-hidden="true">↓</b></button>
         </section>
-        <MediaPanel session={session} mode={mediaMode} onCreateChat={(file) => openChats(file)} />
+        <MediaPanel session={session} mode={mediaMode} onCreateChat={(file) => openChats(file)} onCreateContent={(files) => openContent(files)} />
       </div>}
     </main>
   );

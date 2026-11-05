@@ -53,6 +53,8 @@ class UpdatePermissionsRequest(BaseModel):
     can_view_all_calendars: bool
     can_access_admin: bool
     can_access_chats: bool
+    can_access_content: bool = False
+    can_import_ios_photo_library: bool = False
 
 
 def persist_user(db: Session, user: User) -> None:
@@ -99,6 +101,8 @@ def create_user(
         can_view_all_calendars=payload.role == UserRole.ADMIN,
         can_access_admin=payload.role == UserRole.ADMIN,
         can_access_chats=True,
+        can_access_content=False,
+        can_import_ios_photo_library=False,
     )
     persist_user(db, user)
     db.add(
@@ -256,6 +260,8 @@ def update_permissions(
         "can_view_all_calendars": user.can_view_all_calendars,
         "can_access_admin": user.can_access_admin,
         "can_access_chats": user.can_access_chats,
+        "can_access_content": user.can_access_content,
+        "can_import_ios_photo_library": user.can_import_ios_photo_library,
     }
     user.role = payload.role
     user.can_create_shared_workspaces = payload.can_create_shared_workspaces
@@ -265,6 +271,13 @@ def update_permissions(
     user.can_view_all_calendars = payload.can_view_all_calendars
     user.can_access_admin = payload.can_access_admin
     user.can_access_chats = payload.can_access_chats
+    user.can_access_content = payload.can_access_content
+    if payload.can_import_ios_photo_library and admin.role != UserRole.OWNER:
+        raise HTTPException(
+            status_code=403,
+            detail="Only the owner can grant iPhone library import",
+        )
+    user.can_import_ios_photo_library = payload.can_import_ios_photo_library
     db.add(
         AuditLog(
             actor_id=admin.id,
@@ -283,6 +296,8 @@ def update_permissions(
                         "can_view_all_calendars": user.can_view_all_calendars,
                         "can_access_admin": user.can_access_admin,
                         "can_access_chats": user.can_access_chats,
+                        "can_access_content": user.can_access_content,
+                        "can_import_ios_photo_library": user.can_import_ios_photo_library,
                     },
                 },
                 ensure_ascii=False,

@@ -1,0 +1,43 @@
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: backend/Dockerfile
+    environment: &test-env
+      VITA29_ENVIRONMENT: test
+      VITA29_DATABASE_URL: sqlite:////data/app/test.db
+      VITA29_MEDIA_ROOT: /data/media
+      VITA29_IMPORT_WORKSPACE_NAME: Фото с iPhone
+      VITA29_MINIMUM_FREE_BYTES: 0
+      VITA29_COOKIE_SECURE: "false"
+      VITA29_MOBILE_SESSION_LIFETIME_HOURS: 720
+      VITA29_TEST_PASSWORD: ${VITA29_TEST_PASSWORD:-violetta-test-2026}
+    ports:
+      - "127.0.0.1:${VITA29_TEST_PORT:-18000}:8000"
+    volumes:
+      - test_app_data:/data/app
+      - test_media:/data/media
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+
+  seed:
+    build:
+      context: ../..
+      dockerfile: backend/Dockerfile
+    command: ["python", "-m", "vita29.test_seed"]
+    environment: *test-env
+    volumes:
+      - test_app_data:/data/app
+      - test_media:/data/media
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  test_app_data:
+  test_media:

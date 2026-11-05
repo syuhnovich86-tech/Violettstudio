@@ -45,6 +45,7 @@ def create_owner(display_name: str, login: str) -> None:
             can_view_all_calendars=True,
             can_access_admin=True,
             can_access_chats=True,
+            can_access_content=True,
         )
         db.add(user)
         db.flush()

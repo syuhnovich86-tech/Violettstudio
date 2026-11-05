@@ -130,7 +130,7 @@ class IphoneImporter:
                     location_country=country,
                     location_city=city,
                     location_key=location_key,
-                    publication_allowed=True,
+                    publication_allowed=False,
                 )
                 db.add(media)
                 db.add(
