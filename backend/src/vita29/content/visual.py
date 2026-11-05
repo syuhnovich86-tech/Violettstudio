@@ -90,12 +90,27 @@ def _visual_style(topic_hint: str, instruction: str | None, *, collage: bool = F
     ivory layout; ordinary campaign imagery keeps the established dark-gold
     family unless the editor asks otherwise.
     """
-    text = f"{topic_hint}\n{instruction or ''}".casefold()
-    if re.search(r"светл|крем|молоч|беж|нюд|редакцион|editorial|light", text):
-        return "light"
-    if re.search(r"т[её]мн|ч[её]рн|графит|золот|dark", text):
-        return "dark"
+    # A later refinement is an explicit correction of the earlier brief.  In
+    # particular, "белый стиль" must win over an old reference to gold accents
+    # or a dark sample.  Gold is an accent, not a request for a dark background.
+    fragments = re.split(r"\n\s*Уточнение редактора:\s*", f"{topic_hint}\n{instruction or ''}", flags=re.IGNORECASE)
+    for fragment in reversed(fragments):
+        text = fragment.casefold()
+        if re.search(r"бел\w*|светл|крем|молоч|беж|нюд|редакцион|editorial|light", text):
+            return "light"
+        if re.search(r"т[её]мн|ч[её]рн|графит|dark", text):
+            return "dark"
     return "light" if collage else "dark"
+
+
+def _wants_collage(topic_hint: str, instruction: str | None = None) -> bool:
+    """Recognise normal Russian spellings of a multi-photo collage request."""
+    text = f"{topic_hint}\n{instruction or ''}".casefold()
+    return bool(re.search(
+        r"кол+аж|колаж|калаж|нескольк\w*(?:\s+\w+){0,3}\s+(?:фото|снимк|кадр)|"
+        r"(?:фото|снимк|кадр).{0,36}(?:вместе|кол+аж|колаж|калаж)",
+        text,
+    ))
 
 
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
@@ -164,12 +179,14 @@ def _generated_workspace(db: Session, actor_id: str) -> Workspace:
     return workspace
 
 
-def _visual_prompt(topic_hint: str, instruction: str, has_source: bool) -> str:
-    style = _visual_style(topic_hint, instruction)
+def _visual_prompt(topic_hint: str, instruction: str, has_source: bool, *, collage: bool = False) -> str:
+    style = _visual_style(topic_hint, instruction, collage=collage)
     if style == "light":
         art_direction = (
-            "warm ivory, cream and sand editorial background, subtle taupe line art and restrained "
-            "warm-brown accents. Use clean beauty-magazine styling, smooth rounded organic panels, "
+            "a genuinely light warm-ivory, milk-white, cream and sand editorial background, subtle "
+            "taupe line art and restrained warm-brown or champagne-gold accents. Never use a black, "
+            "charcoal or dark-brown background, dark card, or dark text panel in this light family. "
+            "Use clean beauty-magazine styling, smooth rounded organic panels, "
             "quiet botanical line motifs in the outer edge only, and generous breathing room. Place a "
             "natural close beauty portrait or the relevant treatment result on one side and keep the "
             "opposite/lower area clean for local typography. It must feel like an elegant VIOLETTA "
@@ -187,7 +204,7 @@ def _visual_prompt(topic_hint: str, instruction: str, has_source: bool) -> str:
     base = (
         "Create one polished premium 2:3 vertical social-media visual for VIOLETTA, a Russian "
         f"aesthetics studio. The requested visual family is {style}. {art_direction}"
-        "No neon, no pink or blue gradients, no loud stickers, no childish graphics, no stock-looking collage. "
+        "No neon, no pink or blue gradients, no loud stickers, no childish graphics. "
         "Do not render letters, words, numbers, logos, watermarks or gibberish; the transparent studio "
         "logo and any requested readable copy are added separately after generation. Do not imitate a "
         "specific person's face from an example layout. Never change the treatment area into another procedure. "
@@ -198,6 +215,15 @@ def _visual_prompt(topic_hint: str, instruction: str, has_source: bool) -> str:
             "Preserve the person, anatomy and visible procedure from the supplied photo faithfully. "
             "Make only the requested tasteful retouching/design adjustments. "
         )
+    if collage:
+        base += (
+            "The editor explicitly requests a collage: compose 2 to 4 supplied photographs of the same "
+            "procedure into one coherent premium editorial collage. Keep each source recognisable, use "
+            "a clear hero image plus smaller rounded supporting photos, and do not invent a different "
+            "person, procedure or result. "
+        )
+    else:
+        base += "Do not make a multi-photo collage unless the editor explicitly asks for one. "
     # Do not give the image model the exact post title or editor wording.  It
     # has a strong tendency to turn those words into ugly, duplicated text.
     # The readable title is painted locally after generation; this hint is used
@@ -256,7 +282,7 @@ def requires_generated_visual(title: str, instruction: str | None = None) -> boo
     return bool(re.search(
         r"сген(?:е|и)рир(?:уй|овать)|генерир(?:уй|овать)|генерац|"
         r"созда(?:й|ть|йте)(?=\s|$)|"
-        r"картин|изображен|макет|баннер|ретуш|надпис|текст на фото|"
+        r"картин|изображен|макет|баннер|ретуш|надпис|текст на фото|кол+аж|колаж|калаж|"
         r"добав(?:ь|ить)|убер(?:и|ать)|удал(?:и|ить)|замен(?:и|ить)|"
         r"перчатк|маск[ауи]|фон|логотип",
         request,
@@ -290,8 +316,21 @@ def append_editor_instruction(existing: str | None, refinement: str) -> str:
     deadline. A compact chronology is stable for both the text agent and the
     visual generator without relying on browser state.
     """
-    fresh = " ".join(refinement.split())
-    previous = (existing or "").strip()
+    def without_generic_generation_phrase(value: str) -> str:
+        # This was injected by an older dialog as a helper placeholder and
+        # subsequently leaked into a visible brief. It carries no editorial
+        # meaning, so keep the editor's real request but remove this exact
+        # boilerplate wherever it appears.
+        value = re.sub(
+            r"(?:^|\s)создать\s+фирменное\s+изображение\s+для\s+публикации\.?",
+            " ",
+            value,
+            flags=re.IGNORECASE,
+        )
+        return " ".join(value.split())
+
+    fresh = without_generic_generation_phrase(refinement)
+    previous = without_generic_generation_phrase(existing or "")
     if not previous:
         return fresh
     if not fresh or fresh.casefold() in previous.casefold():
@@ -569,7 +608,10 @@ def _draw_campaign_copy(
     # Promotional text is deliberately composed as a card with a semantic
     # heading and one or two offer rows.  This means prices and conditions live
     # on the image itself, while the post caption remains a readable duplicate.
-    heading_font = _serif_font(48, bold=False)
+    # The offer needs to be immediately readable in a feed.  Use a large
+    # title and one calm outer panel; a second rounded outline inside it made
+    # the earlier banner look cramped and visually noisy.
+    heading_font = _serif_font(68, bold=False)
     prepared_offers: list[
         tuple[
             list[str],
@@ -588,8 +630,8 @@ def _draw_campaign_copy(
             draw,
             details if has_exact_editor_copy else _capitalize_first_letter(details),
             560 if has_price else 810,
-            preferred_size=38 if has_price else 42,
-            minimum_size=24,
+            preferred_size=48 if has_price else 54,
+            minimum_size=28,
             max_lines=3,
         )
         detail_step = round(detail_size * 1.2)
@@ -598,26 +640,25 @@ def _draw_campaign_copy(
         price_size = 0
         if price:
             price_font, price_lines, price_size = _fit_wrapped_text(
-                draw, price, 240, preferred_size=60, minimum_size=36, max_lines=2, serif=True
+                draw, price, 240, preferred_size=68, minimum_size=40, max_lines=2, serif=True
             )
         text_height = max(len(detail_lines) * detail_step, len(price_lines) * round(price_size * 1.1))
-        card_height = max(176, min(228, text_height + 54))
+        card_height = max(168, min(236, text_height + 48))
         prepared_offers.append((
             detail_lines, detail_font, detail_step, price_lines, price_font, price_size, card_height, price
         ))
 
-    total_height = 86 + sum(offer[6] + 18 for offer in prepared_offers) + 30
-    top = max(360, 1302 - total_height)
+    total_height = 112 + sum(offer[6] + 14 for offer in prepared_offers) + 30
+    top = max(330, 1302 - total_height)
     draw.rounded_rectangle((48, top, 1032, 1302), radius=30, fill=(10, 8, 7, 210), outline=(222, 174, 88, 245), width=2)
     _draw_firm_gold_text(
-        draw, (540, top + 35), "АКЦИЯ", heading_font, anchor="ma", fill=_GOLD_TEXT_BRIGHT
+        draw, (540, top + 42), "АКЦИЯ", heading_font, anchor="ma", fill=_GOLD_TEXT_BRIGHT
     )
-    y = top + 86
+    y = top + 112
     for detail_lines, detail_font, detail_step, price_lines, price_font, price_size, card_height, price in prepared_offers:
-        draw.rounded_rectangle((76, y, 1004, y + card_height), radius=24, outline=(225, 185, 117, 235), width=2)
         if price:
             divider = 710
-            draw.line((divider, y + 28, divider, y + card_height - 28), fill=(225, 185, 117, 205), width=2)
+            draw.line((divider, y + 22, divider, y + card_height - 22), fill=(225, 185, 117, 205), width=2)
             detail_center = 392
         else:
             detail_center = 540
@@ -635,7 +676,7 @@ def _draw_campaign_copy(
                     draw, (858, price_y), line, price_font, anchor="mm", fill=_GOLD_TEXT_BRIGHT
                 )
                 price_y += price_step
-        y += card_height + 18
+        y += card_height + 14
 
 
 def _draw_light_editorial_copy(
@@ -684,7 +725,7 @@ def _overlay_brand_caption(
     with Image.open(io.BytesIO(image_bytes)) as source:
         image = ImageOps.fit(ImageOps.exif_transpose(source).convert("RGB"), (1080, 1350), method=Image.Resampling.LANCZOS)
     draw = ImageDraw.Draw(image, "RGBA")
-    style = _visual_style(title, instruction)
+    style = _visual_style(title, instruction, collage=_wants_collage(title, instruction))
     _draw_brand_lockup(draw, 52, 46, style=style)
     if style == "light":
         _draw_light_editorial_copy(draw, title, instruction, copy_hint)
@@ -827,7 +868,16 @@ def generate_branded_visual(
     image_model = config_value(settings, "openai_image_model", settings.openai_image_model)
     # The short topic is passed alongside an optional editor note, so image
     # generation cannot accidentally illustrate a different treatment.
-    prompt = _visual_prompt(item.title, instruction, bool(image_sources))
+    collage_requested = _wants_collage(item.title, instruction)
+    # Several selected source photos are intentionally treated as a collage as
+    # well: the content agent made that selection specifically for one merged
+    # publication visual. A single selected photo remains a normal edit.
+    prompt = _visual_prompt(
+        item.title,
+        instruction,
+        bool(image_sources),
+        collage=collage_requested or len(image_sources) >= 2,
+    )
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
         with openai_ipv4_client(settings.openai_http_timeout_seconds) as client:

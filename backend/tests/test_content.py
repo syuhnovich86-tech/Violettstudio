@@ -1,16 +1,20 @@
-from types import SimpleNamespace
-from pathlib import Path
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from tests.test_auth import login, seed_user
 from vita29.content.public_links import create_temporary_public_link, revoke_public_links
-from vita29.content.visual import _campaign_copy
+from vita29.content.visual import (
+    _campaign_copy,
+    _visual_style,
+    _wants_collage,
+    append_editor_instruction,
+)
 from vita29.db.models import (
-    ContentPublication,
     ContentItem,
+    ContentPublication,
     MediaFile,
     MediaType,
     PublicationPlatform,
@@ -202,6 +206,25 @@ def test_visual_uses_explicit_editor_labels_verbatim_without_inventing_copy() ->
     )
     assert is_explicit is True
     assert copy == "Работа мастера Вероники, ваша студия Виолетта."
+
+
+def test_latest_white_refinement_overrides_old_dark_gold_reference() -> None:
+    instruction = append_editor_instruction(
+        "Тёмный баннер с золотыми акцентами.",
+        "Сделай в белом стиле, коллаж из нескольких фото губ.",
+    )
+    assert _visual_style("Рекламный пост", instruction) == "light"
+    assert _wants_collage("Рекламный пост", instruction) is True
+
+
+def test_helper_phrase_does_not_leak_into_editor_brief() -> None:
+    instruction = append_editor_instruction(
+        "Скидка 30% на перманент губ. Создать фирменное изображение для публикации.",
+        "Сделать в белом стиле.",
+    )
+    assert "Создать фирменное изображение" not in instruction
+    assert "Скидка 30%" in instruction
+    assert "белом стиле" in instruction
 
 
 def test_content_refinements_keep_the_original_brief(client: TestClient, tmp_path) -> None:

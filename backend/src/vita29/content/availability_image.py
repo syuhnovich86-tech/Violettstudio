@@ -62,11 +62,18 @@ def _draw_centered(
     draw.text((x, y), text, font=font, fill=fill)
 
 
-def draw_availability_overlay(image: Image.Image, slots: list[dict[str, object]]) -> Image.Image:
+def draw_availability_overlay(
+    image: Image.Image,
+    slots: list[dict[str, object]],
+    *,
+    template_label: str = "",
+) -> Image.Image:
     """Paint date and free times into the fixed rows of a studio master card.
 
-    The six staff templates intentionally share this 9:16 geometry.  Keeping
-    this renderer deterministic avoids generated text drifting outside a row.
+    Most staff templates share one 9:16 geometry.  The Вероника and Светлана
+    косметолог layouts have their weekday grid slightly higher, so their
+    profile is calibrated separately.  Keeping the renderer deterministic
+    avoids generated text drifting outside a row.
     """
     draw = ImageDraw.Draw(image)
     width, height = image.size
@@ -82,7 +89,12 @@ def draw_availability_overlay(image: Image.Image, slots: list[dict[str, object]]
     field_left = int(width * 0.068)
     field_right = int(width * 0.357)
     field_center_x = (field_left + field_right) // 2
-    first_row_center_y = int(height * 0.375)
+    label = template_label.casefold()
+    raised_grid = "вероник" in label or ("светлан" in label and "космет" in label)
+    # On two layouts the empty outlined rows start 35 px higher on a 1672 px
+    # source image.  Without this correction the large text is centred in the
+    # gap under the row instead of inside it.
+    first_row_center_y = int(height * (0.354 if raised_grid else 0.375))
     row_step = int(height * 0.0658)
     date_center_x = int(width * 0.505)
     date_font = _font(max(24, int(width * 0.043)), bold=False)
@@ -181,7 +193,11 @@ def render_availability_image(
     temporary = target.with_suffix(".tmp")
     with Image.open(source) as raw:
         image = ImageOps.exif_transpose(raw).convert("RGB")
-        image = draw_availability_overlay(image, slots)
+        image = draw_availability_overlay(
+            image,
+            slots,
+            template_label=f"{template.original_name} {template.comment or ''}",
+        )
         image.save(temporary, format="JPEG", quality=94, optimize=True)
     temporary.replace(target)
     thumbnail_path(settings, generated.id).unlink(missing_ok=True)

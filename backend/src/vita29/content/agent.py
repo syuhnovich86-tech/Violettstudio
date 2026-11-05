@@ -103,6 +103,16 @@ def _video_requested(item: ContentItem) -> bool:
     return bool(re.search(r"видео|видеоролик|ролик|reels?|рилс", text))
 
 
+def _collage_requested(item: ContentItem) -> bool:
+    """Recognise an editor request to make one post from several source photos."""
+    text = f"{item.title}\n{item.editor_instruction or ''}".casefold()
+    return bool(re.search(
+        r"кол+аж|колаж|калаж|нескольк\w*(?:\s+\w+){0,3}\s+(?:фото|снимк|кадр)|"
+        r"(?:фото|снимк|кадр).{0,36}(?:вместе|кол+аж|колаж|калаж)",
+        text,
+    ))
+
+
 def _staff_comment_score(mapping: YclientsStaffMapping, comment: str) -> int:
     """Match an administrator-written template comment to one, exact master.
 
@@ -529,8 +539,13 @@ def prepare_telegram_draft(
                 # «РФ лифтинг» to be missed on production even when it exists.
                 candidate_query = candidate_query.where(Workspace.display_name.in_(service_folders))
     video_requested = _video_requested(item)
+    collage_requested = _collage_requested(item)
     if video_requested:
         candidate_query = candidate_query.where(MediaFile.media_type == MediaType.VIDEO)
+    elif collage_requested:
+        # A collage is assembled from stills. A video thumbnail can be useful
+        # for a normal post, but must not silently become one tile in a collage.
+        candidate_query = candidate_query.where(MediaFile.media_type == MediaType.IMAGE)
     all_candidates = db.scalars(
         candidate_query.order_by(
             MediaFile.content_marked.desc(),
@@ -555,12 +570,17 @@ def prepare_telegram_draft(
             "В теме указано видео, но среди доступных материалов нет подходящего видео. "
             "Выберите видео вручную или снимите новый ролик."
         )
+    if collage_requested and len(candidates) < 2:
+        raise ContentAgentError(
+            "Для коллажа нужны минимум два подходящих фото. Добавьте или выберите ещё один кадр."
+        )
     # The metadata list and visual list must be exactly aligned. Video candidates
     # contribute their first preview frame, so service folders can provide either
     # photos or video without opening a path to a mismatched ID.
     candidates, visual_inputs = _visual_candidates(candidates, settings)
     candidate_ids = {media.id for media in candidates}
     requested_categories = _topic_categories(f"{item.title}\n{item.editor_instruction or ''}")
+    selection_limit = min(4, max(item.media_limit, 2)) if collage_requested else item.media_limit
     system = (
         "Ты редактор контента студии VIOLETTA. Подготовь русскоязычный черновик публикации "
         "для Telegram по согласованной теме. Используй только переданный список разрешённых "
@@ -577,8 +597,10 @@ def prepare_telegram_draft(
         "только если крупно видно ухо или другую часть тела с украшением. Если процедура по "
         "подписи или папке противоречит изображению, не выбирай файл. Если подходящего кадра "
         "нет, верни пустой список материалов и напиши честный текст без фото. Тон: тёплый, "
-        "уверенный, профессиональный; 1–3 уместных эмодзи; короткие абзацы; мягкий призыв "
-        "записаться или задать вопрос. Не повторяй служебные слова из задачи редактора вроде "
+        "уверенный, профессиональный; 1–3 уместных эмодзи; короткие абзацы. Заканчивай подпись "
+        "одной простой конкретной фразой-призывом, например «Напишите нам, чтобы уточнить детали "
+        "и выбрать удобное время». Не добавляй два разных вопроса подряд и не пиши расплывчатое "
+        "«будем рады помочь». Не повторяй служебные слова из задачи редактора вроде "
         "«сгенерируй», «создай», «баннер», «для рекламы» или название платформы. Собирай "
         "смысл согласованной темы и последующих уточнений в цельный клиентский текст: сохраняй "
         "все явно указанные факты, условия, цены и даты, исправляй очевидные опечатки и "
@@ -597,6 +619,12 @@ def prepare_telegram_draft(
         system += (
             " В теме явно запрошено видео: выбирай только видеофайлы. "
             "Никогда не подменяй запрос на видео фотографией."
+        )
+    if collage_requested:
+        system += (
+            " Редактор явно просит коллаж: выбери от 2 до 4 разных фотографий одной процедуры. "
+            "Эти изображения станут одной общей картинкой, поэтому не выбирай видео и не смешивай "
+            "разные процедуры, клиентов или этапы без явного запроса «до/после»."
         )
     schema = {
         "type": "object",
@@ -643,7 +671,7 @@ def prepare_telegram_draft(
                     f"Формат: {item.content_format.value}. "
                     f"Если формат story — напиши коротко и динамично, это текст для истории. "
                     f"Если availability — говори только о переданных свободных окнах и предложи записаться.\n"
-                    f"Максимум материалов: {item.media_limit}\n"
+                    f"Максимум материалов: {selection_limit}\n"
                     f"Свободные окна: {item.availability_slots_json}\n"
                     f"Дата публикации: {item.scheduled_at.isoformat()}\n"
                     f"Разрешённые материалы в том же порядке, что приложенные миниатюры: {_candidate_context(candidates)}"
@@ -666,7 +694,7 @@ def prepare_telegram_draft(
     selected_media = output.get("selected_media", [])
     if not caption or len(caption) > 4000:
         raise ContentAgentError("The content agent returned an invalid caption")
-    if not isinstance(selected_media, list) or len(selected_media) > item.media_limit:
+    if not isinstance(selected_media, list) or len(selected_media) > selection_limit:
         raise ContentAgentError("The content agent selected an invalid number of files")
     # A relevant text-only draft is safer than putting a client image from another
     # procedure into a publication. The editor can choose "Другие материалы" after
@@ -687,6 +715,14 @@ def prepare_telegram_draft(
         selected_media_ids.append(media_id)
     if len(set(selected_media_ids)) != len(selected_media_ids):
         raise ContentAgentError("The content agent selected the same file twice")
+    if collage_requested:
+        if len(selected_media_ids) < 2:
+            raise ContentAgentError("Для коллажа агент должен выбрать минимум два подходящих фото")
+        if any(
+            next(media for media in candidates if media.id == media_id).media_type != MediaType.IMAGE
+            for media_id in selected_media_ids
+        ):
+            raise ContentAgentError("Для коллажа можно использовать только фотографии")
     if video_requested and (not selected_media_ids or any(
         next(media for media in candidates if media.id == media_id).media_type != MediaType.VIDEO
         for media_id in selected_media_ids

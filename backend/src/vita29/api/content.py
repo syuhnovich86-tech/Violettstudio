@@ -898,6 +898,24 @@ def prepare_content_item(
         # page, where an old cached bundle (and a Cyrillic regex boundary)
         # could skip the visual endpoint and leave an unrelated archive photo.
         # Keep this server-side so every platform has the same prepared asset.
+        # Manual selections are always honoured, but an automatic content
+        # selection is equally valuable for a request such as «сделай коллаж
+        # губ из галереи».  Feed the selected source files into the visual
+        # builder instead of losing them and producing an unrelated stock-like
+        # banner.
+        prepared_source_media = explicit_source_media
+        if not prepared_source_media and draft.media_ids:
+            selected_by_id = {
+                media.id: media
+                for media in db.scalars(
+                    select(MediaFile).where(MediaFile.id.in_(draft.media_ids))
+                ).all()
+            }
+            prepared_source_media = [
+                selected_by_id[media_id]
+                for media_id in draft.media_ids
+                if media_id in selected_by_id
+            ]
         if item.visual_edit_requested and not any(media.media_type == MediaType.IMAGE for media in explicit_source_media):
             raise HTTPException(
                 status_code=422,
@@ -911,7 +929,7 @@ def prepare_content_item(
                     item,
                     user.id,
                     item.editor_instruction or item.title,
-                    explicit_source_media,
+                    prepared_source_media,
                     copy_hint=draft.caption,
                     force_edit=item.visual_edit_requested,
                 )
