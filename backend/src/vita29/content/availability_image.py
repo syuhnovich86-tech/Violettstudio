@@ -24,17 +24,84 @@ def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
-def _line_for(times: object, width: int, font: ImageFont.FreeTypeFont) -> str:
+def _fit_slot_line(times: object, width: int) -> tuple[str, ImageFont.FreeTypeFont] | None:
+    """Return a large, readable time line that cannot touch the template star.
+
+    A card is meant to be read in Stories.  Two nearest one-hour windows are
+    substantially more useful than a tiny, unreadable list of every opening.
+    The date is painted separately to the right of the outlined row.
+    """
     values = [str(value) for value in times] if isinstance(times, list) else []
-    chosen: list[str] = []
-    for value in values:
-        attempt = " · ".join([*chosen, value])
-        if chosen and font.getlength(attempt) > width:
-            break
-        chosen.append(value)
-    if not chosen:
-        return "—"
-    return " · ".join(chosen)
+    values = [value for value in values if value][:2]
+    if not values:
+        return None
+    text = "/".join(values)
+    for size in range(50, 31, -2):
+        font = _font(size, bold=False)
+        if font.getlength(text) <= width:
+            return text, font
+    return text, _font(30, bold=False)
+
+
+def _draw_centered(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    center_x: int,
+    center_y: int,
+    *,
+    fill: tuple[int, int, int] = (255, 244, 215),
+) -> None:
+    """Centre glyphs, not their baseline, and keep a subtle dark contour."""
+    box = draw.textbbox((0, 0), text, font=font)
+    x = center_x - (box[2] - box[0]) // 2 - box[0]
+    y = center_y - (box[3] - box[1]) // 2 - box[1]
+    # A one-pixel shadow keeps the pale gold values readable over every master
+    # portrait without altering the original template artwork.
+    draw.text((x + 1, y + 1), text, font=font, fill=(50, 31, 12))
+    draw.text((x, y), text, font=font, fill=fill)
+
+
+def draw_availability_overlay(image: Image.Image, slots: list[dict[str, object]]) -> Image.Image:
+    """Paint date and free times into the fixed rows of a studio master card.
+
+    The six staff templates intentionally share this 9:16 geometry.  Keeping
+    this renderer deterministic avoids generated text drifting outside a row.
+    """
+    draw = ImageDraw.Draw(image)
+    width, height = image.size
+    by_date: dict[str, list[str]] = {}
+    for slot in slots:
+        day = str(slot.get("date") or "")
+        times = slot.get("times")
+        if day and isinstance(times, list):
+            by_date[day] = [str(value) for value in times]
+
+    # These coordinates are measured on the approved 1080×1920 master and
+    # then scaled.  `field_right` stops just before the decorative star.
+    field_left = int(width * 0.068)
+    field_right = int(width * 0.357)
+    field_center_x = (field_left + field_right) // 2
+    first_row_center_y = int(height * 0.375)
+    row_step = int(height * 0.0658)
+    date_center_x = int(width * 0.505)
+    date_font = _font(max(24, int(width * 0.043)), bold=False)
+
+    for day, times in sorted(by_date.items()):
+        try:
+            index = date.fromisoformat(day).weekday()
+        except ValueError:
+            continue
+        fitted = _fit_slot_line(times, field_right - field_left - int(width * 0.016))
+        if fitted is None:
+            continue
+        text, time_font = fitted
+        row_y = first_row_center_y + index * row_step
+        _draw_centered(draw, text, time_font, field_center_x, row_y)
+        # The date belongs to the right of its own weekday row, never inside
+        # the time field.  Leading zeroes remove ambiguity across months.
+        _draw_centered(draw, f"{day[8:10]}.{day[5:7]}", date_font, date_center_x, row_y)
+    return image
 
 
 def render_availability_image(
@@ -109,59 +176,12 @@ def render_availability_image(
         db.add(generated)
         db.flush()
 
-    by_date: dict[str, list[str]] = {}
-    for slot in slots:
-        day = str(slot.get("date") or "")
-        times = slot.get("times")
-        if day and isinstance(times, list):
-            by_date[day] = [str(value) for value in times]
-
     target = original_path(settings, generated.storage_key)
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = target.with_suffix(".tmp")
     with Image.open(source) as raw:
         image = ImageOps.exif_transpose(raw).convert("RGB")
-        draw = ImageDraw.Draw(image)
-        width, height = image.size
-        # Template fields occupy the left half. Coordinates scale with the source,
-        # so the same branded layout works for 1080×1920 and larger exports.
-        # Keep inserted times inside the gold outlines and clear of the star.
-        x = int(width * 0.082)
-        field_width = int(width * 0.295)
-        # The text belongs in the centre of the outlined row, not next to the
-        # weekday label above it.  The earlier values anchored it roughly one
-        # label-height too high on the actual studio templates.
-        start_y = int(height * 0.375)
-        step = int(height * 0.0658)
-        # A phone is the primary viewing surface for these cards.  Keep the
-        # values noticeably larger than the template labels, while _line_for
-        # still trims the list before a value can collide with the star.
-        font = _font(max(20, int(width * 0.024)), bold=False)
-        # The template has permanent Monday–Sunday rows.  A sparse list of
-        # availability must therefore be mapped by the real calendar weekday,
-        # never by its position in the response (otherwise Thursday becomes
-        # the first row, i.e. Monday).  Including the date also makes a
-        # published card unambiguous when a week crosses a month boundary.
-        for day, times in sorted(by_date.items()):
-            try:
-                index = date.fromisoformat(day).weekday()
-            except ValueError:
-                continue
-            date_label = f"{day[8:10]}.{day[5:7]}"
-            prefix = f"{date_label} · "
-            text = prefix + _line_for(
-                times,
-                max(1, field_width - int(font.getlength(prefix))),
-                font,
-            )
-            box = draw.textbbox((0, 0), text, font=font)
-            text_width = box[2] - box[0]
-            # Centre the actual glyph box, rather than its baseline, inside
-            # the template field. This keeps every date/time line visually
-            # centred even when a font has a non-zero top bearing.
-            text_x = x + (field_width - text_width) // 2
-            text_y = start_y + index * step - (box[1] + box[3]) // 2
-            draw.text((text_x, text_y), text, font=font, fill=(255, 244, 215))
+        image = draw_availability_overlay(image, slots)
         image.save(temporary, format="JPEG", quality=94, optimize=True)
     temporary.replace(target)
     thumbnail_path(settings, generated.id).unlink(missing_ok=True)
