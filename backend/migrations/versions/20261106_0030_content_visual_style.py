@@ -1,7 +1,7 @@
 """Store an explicit light or dark family for generated visuals.
 
 Revision ID: 20261106_0030
-Revises: 20261105_0029
+Revises: 20261105_0031
 Create Date: 2026-11-06
 """
 
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 
 
 revision = "20261106_0030"
-down_revision = "20261105_0029"
+down_revision = "20261105_0031"
 branch_labels = None
 depends_on = None
 
