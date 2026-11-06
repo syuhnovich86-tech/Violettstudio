@@ -429,6 +429,9 @@ class ContentItem(Base):
     # selected a source photo, even though it does not contain the word
     # "сгенерируй".
     visual_edit_requested: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    # Explicit creative-family selection.  "auto" preserves compatibility for
+    # older cards, while light/dark makes an editor's choice deterministic.
+    visual_style: Mapped[str] = mapped_column(String(8), default="auto", server_default="auto")
     content_format: Mapped[ContentFormat] = mapped_column(
         Enum(ContentFormat), default=ContentFormat.POST, index=True
     )

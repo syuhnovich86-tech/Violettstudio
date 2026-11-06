@@ -1,13 +1,17 @@
+import io
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+from PIL import Image
 from sqlalchemy.orm import Session
 
 from tests.test_auth import login, seed_user
 from vita29.content.public_links import create_temporary_public_link, revoke_public_links
 from vita29.content.visual import (
+    _before_after_collage,
     _campaign_copy,
+    _overlay_brand_caption,
     _visual_style,
     _wants_collage,
     append_editor_instruction,
@@ -208,13 +212,63 @@ def test_visual_uses_explicit_editor_labels_verbatim_without_inventing_copy() ->
     assert copy == "Работа мастера Вероники, ваша студия Виолетта."
 
 
-def test_latest_white_refinement_overrides_old_dark_gold_reference() -> None:
+def test_explicit_style_choice_never_depends_on_refinement_order() -> None:
     instruction = append_editor_instruction(
         "Тёмный баннер с золотыми акцентами.",
         "Сделай в белом стиле, коллаж из нескольких фото губ.",
     )
-    assert _visual_style("Рекламный пост", instruction) == "light"
+    assert _visual_style("Рекламный пост", instruction, requested_style="light") == "light"
+    assert _visual_style("Рекламный пост", instruction, requested_style="dark") == "dark"
     assert _wants_collage("Рекламный пост", instruction) is True
+
+
+def test_twenty_light_and_dark_visual_quality_checks_keep_the_requested_family(tmp_path) -> None:
+    """Ten light and ten dark local render checks, with three collages each.
+
+    The checks do not call an external image model: they validate the final,
+    deterministic stage that protects the selected brand family after every
+    model response.  Source photographs use distinct solid colours so a
+    collage cannot silently drop the editor's selected media.
+    """
+    settings = Settings(media_root=tmp_path / "media")
+    source_entries = []
+    source_colours = [(224, 64, 55), (46, 144, 202), (77, 167, 108), (186, 92, 184)]
+    for index, colour in enumerate(source_colours):
+        key = f"qa/source-{index}.jpg"
+        path = settings.originals_path / key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (700, 900), colour).save(path, format="JPEG")
+        source_entries.append(SimpleNamespace(storage_key=key))
+
+    for style in ("light", "dark"):
+        for number in range(10):
+            if number in {2, 5, 8}:
+                rendered = _before_after_collage(
+                    source_entries[: 2 + (number % 2)],
+                    settings,
+                    "Коллаж результата процедуры",
+                    "Коллаж из выбранных фото без замены результата.",
+                    requested_style=style,
+                )
+            else:
+                base = io.BytesIO()
+                Image.new("RGB", (920, 1240), source_colours[number % len(source_colours)]).save(
+                    base, format="JPEG"
+                )
+                rendered = _overlay_brand_caption(
+                    base.getvalue(),
+                    "Рекламный пост студии",
+                    "Сохрани выбранный фирменный стиль.",
+                    requested_style=style,
+                )
+            with Image.open(io.BytesIO(rendered)) as result:
+                image = result.convert("RGB")
+                assert image.size == (1080, 1350)
+                corner = image.getpixel((1045, 1328))
+                if style == "light":
+                    assert sum(corner) / 3 > 175
+                else:
+                    assert sum(corner) / 3 < 75
 
 
 def test_helper_phrase_does_not_leak_into_editor_brief() -> None:

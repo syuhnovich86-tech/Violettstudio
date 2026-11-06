@@ -1,7 +1,7 @@
 import json
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
@@ -72,6 +72,7 @@ class ContentItemResponse(BaseModel):
     caption: str | None
     editor_instruction: str | None
     visual_edit_requested: bool
+    visual_style: Literal["auto", "light", "dark"]
     content_format: ContentFormat
     media_limit: int
     availability_staff_id: int | None
@@ -92,6 +93,7 @@ class ContentItemCreate(BaseModel):
     caption: str | None = Field(default=None, max_length=5000)
     editor_instruction: str | None = Field(default=None, max_length=1000)
     visual_edit_requested: bool = False
+    visual_style: Literal["auto", "light", "dark"] = "auto"
     scheduled_at: datetime
     platforms: list[PublicationPlatform] = Field(min_length=1)
     platform_formats: dict[PublicationPlatform, str] = Field(default_factory=dict)
@@ -119,6 +121,7 @@ class ContentItemUpdate(BaseModel):
     caption: str | None = Field(default=None, max_length=5000)
     editor_instruction: str | None = Field(default=None, max_length=1000)
     visual_edit_requested: bool | None = None
+    visual_style: Literal["auto", "light", "dark"] | None = None
     append_editor_instruction: bool = False
     scheduled_at: datetime | None = None
     platforms: list[PublicationPlatform] | None = Field(default=None, min_length=1)
@@ -391,6 +394,7 @@ def response_for(db: Session, item: ContentItem) -> ContentItemResponse:
         caption=item.caption,
         editor_instruction=item.editor_instruction,
         visual_edit_requested=item.visual_edit_requested,
+        visual_style=item.visual_style,
         content_format=item.content_format,
         media_limit=item.media_limit,
         availability_staff_id=item.availability_staff_id,
@@ -602,6 +606,7 @@ def create_content_item(
         caption=payload.caption.strip() if payload.caption else None,
         editor_instruction=payload.editor_instruction.strip() if payload.editor_instruction else None,
         visual_edit_requested=payload.visual_edit_requested,
+        visual_style=payload.visual_style,
         scheduled_at=future_content_schedule(payload.scheduled_at, settings),
         media_ids_json=json.dumps(media_ids),
         content_format=payload.content_format,
@@ -642,6 +647,7 @@ def create_content_plan(
             title=entry.title.strip(),
             caption=None,
             visual_edit_requested=entry.visual_edit_requested,
+            visual_style=entry.visual_style,
             scheduled_at=scheduled_at,
             media_ids_json="[]",
             content_format=entry.content_format,
@@ -690,6 +696,8 @@ def update_content_item(
         )
     if "visual_edit_requested" in changes:
         item.visual_edit_requested = bool(changes["visual_edit_requested"])
+    if "visual_style" in changes:
+        item.visual_style = changes["visual_style"]
     if "scheduled_at" in changes:
         item.scheduled_at = future_content_schedule(changes["scheduled_at"], get_settings())
     if "media_ids" in changes:

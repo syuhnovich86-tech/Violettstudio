@@ -171,6 +171,7 @@ type ShareVideoStatus = {
 };
 type ContentPlatform = "telegram" | "max" | "instagram";
 type ContentFormat = "post" | "story" | "availability";
+type ContentVisualStyle = "auto" | "light" | "dark";
 type PublicationFormat = "post" | "story" | "reel";
 type ContentStatus = "draft" | "review" | "approved" | "generating" | "ready" | "scheduled" | "published" | "failed";
 type ContentPublication = {
@@ -190,6 +191,7 @@ type ContentItem = {
   caption: string | null;
   editor_instruction: string | null;
   visual_edit_requested: boolean;
+  visual_style: ContentVisualStyle;
   content_format: ContentFormat;
   media_limit: number;
   availability_staff_id: number | null;
@@ -208,6 +210,7 @@ type WeeklyContentEntry = {
   day: number;
   title: string;
   content_format: ContentFormat;
+  visual_style: ContentVisualStyle;
   media_limit: number;
   platforms: ContentPlatform[];
   platform_formats: Partial<Record<ContentPlatform, PublicationFormat>>;
@@ -2576,6 +2579,7 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
   const [creating, setCreating] = useState(false);
   const [createMode, setCreateMode] = useState<"day" | "week">("day");
   const [newContentFormat, setNewContentFormat] = useState<ContentFormat>("post");
+  const [newVisualStyle, setNewVisualStyle] = useState<ContentVisualStyle>("auto");
   const [availabilityStaff, setAvailabilityStaff] = useState<AvailabilityStaff[]>([]);
   const [contentLibrary, setContentLibrary] = useState<ContentLibraryMedia[]>([]);
   const [contentLibraryFolders, setContentLibraryFolders] = useState<ContentLibraryWorkspace[]>([]);
@@ -2598,7 +2602,7 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
   } | null>(null);
   const [refinementError, setRefinementError] = useState("");
   const [weekEntries, setWeekEntries] = useState<WeeklyContentEntry[]>([
-    { day: 0, title: "", content_format: "post", media_limit: 1, platforms: ["telegram"], platform_formats: { telegram: "post" } },
+    { day: 0, title: "", content_format: "post", media_limit: 1, visual_style: "auto", platforms: ["telegram"], platform_formats: { telegram: "post" } },
   ]);
 
   const weekEnd = new Date(weekStart);
@@ -2711,6 +2715,7 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
           availability_staff_id: contentFormat === "availability" ? Number(form.get("availability_staff_id") || 0) || null : null,
           editor_instruction: String(form.get("editor_instruction") || "").trim() || null,
           visual_edit_requested: sourceImageEdit,
+          visual_style: newVisualStyle,
         }),
       });
       setWorkingId(created.id);
@@ -2725,6 +2730,7 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
       setNewTitle("");
       setNewEditorInstruction("");
       setNewContentFormat("post");
+      setNewVisualStyle("auto");
       setSelectedSourceMedia([]);
       setSourceImageEdit(false);
       setContentLibraryOpen(false);
@@ -2768,6 +2774,7 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
         media_ids: [],
         content_format: entry.content_format,
         media_limit: entry.media_limit,
+        visual_style: entry.visual_style,
       };
     });
     setError("");
@@ -2778,7 +2785,7 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
         body: JSON.stringify({ items: itemsForWeek }),
       });
       formElement.reset();
-      setWeekEntries([{ day: 0, title: "", content_format: "post", media_limit: 1, platforms: ["telegram"], platform_formats: { telegram: "post" } }]);
+      setWeekEntries([{ day: 0, title: "", content_format: "post", media_limit: 1, visual_style: "auto", platforms: ["telegram"], platform_formats: { telegram: "post" } }]);
       setCreating(false);
       await load();
     } catch (requestError) {
@@ -3018,6 +3025,7 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
     {creating && <div className="content-create-box"><div className="content-create-tabs"><button type="button" className={createMode === "day" ? "active" : ""} onClick={() => setCreateMode("day")}>На день</button><button type="button" className={createMode === "week" ? "active" : ""} onClick={() => setCreateMode("week")}>На всю неделю</button></div>
     {createMode === "day" ? <form className="content-create-form" onSubmit={createItem}>
       <fieldset className="content-format-choice"><legend>Что готовим</legend><label><input type="radio" name="content_format" value="post" checked={newContentFormat === "post"} onChange={() => setNewContentFormat("post")} />Пост</label><label><input type="radio" name="content_format" value="story" checked={newContentFormat === "story"} onChange={() => setNewContentFormat("story")} />История</label><label><input type="radio" name="content_format" value="availability" checked={newContentFormat === "availability"} onChange={() => setNewContentFormat("availability")} />Свободные окна</label></fieldset>
+      {newContentFormat !== "availability" && <fieldset className="content-visual-style-choice"><legend>Стиль макета</legend><label><input type="radio" name="visual_style" value="auto" checked={newVisualStyle === "auto"} onChange={() => setNewVisualStyle("auto")} />Авто</label><label><input type="radio" name="visual_style" value="light" checked={newVisualStyle === "light"} onChange={() => setNewVisualStyle("light")} />Светлый / белый</label><label><input type="radio" name="visual_style" value="dark" checked={newVisualStyle === "dark"} onChange={() => setNewVisualStyle("dark")} />Тёмный / чёрный</label><small className="muted">Выбранный стиль фиксируется: светлый всегда получает светлую основу, тёмный — чёрно‑золотую.</small></fieldset>}
       {newContentFormat !== "availability" && <label>{sourceImageEdit ? "Результат обработки" : "Тема"}<div className="voice-input-row"><input name="title" minLength={2} maxLength={180} required value={newTitle} onChange={(event) => setNewTitle(event.target.value)} placeholder={sourceImageEdit ? "Например, ретушь результата перманента губ" : "Например, результат процедуры до/после"} /><VoiceInputButton csrfToken={session.csrf_token} onAppend={(spoken) => setNewTitle((current) => appendDictatedText(current, spoken))} /></div><small className="muted">Можно надиктовать тему: нажмите «Стоп», и текст появится в поле.</small></label>}
       {newContentFormat === "availability" && <label>Мастер для окон<select name="availability_staff_id" required defaultValue=""><option value="" disabled>Выберите мастера</option>{availabilityStaff.map((entry) => <option key={entry.staff_id} value={entry.staff_id}>{entry.staff_name}{entry.specialization ? ` — ${entry.specialization}` : ""}</option>)}</select><small className="muted">Будет использован только шаблон, в комментарии к которому указан этот мастер.</small></label>}
       {newContentFormat !== "availability" && <><label>{sourceImageEdit ? "Что изменить на фото" : "Уточнение для агента"} <small className="muted">необязательно</small><textarea name="editor_instruction" maxLength={1000} value={newEditorInstruction} onChange={(event) => setNewEditorInstruction(event.target.value)} placeholder={sourceImageEdit ? "Например: «Убери маску, добавь чёрные перчатки, сделай мягкую ретушь. Добавь золотую надпись и логотип VIOLETTA»." : "Например: «сгенерируй видео о процедуре», «сгенерируй картинку в тёмной золотой стилистике»."} /><div className="voice-input-row"><VoiceInputButton csrfToken={session.csrf_token} onAppend={(spoken) => setNewEditorInstruction((current) => appendDictatedText(current, spoken))} /></div><small className="muted">Новое уточнение дополняет тему и сохраняется вместе с ней.</small></label><div className="content-source-picker"><div><strong>Фото и видео из хранилища</strong><small>{selectedSourceMedia.length ? "Выбрано: " + selectedSourceMedia.length : "Необязательно: агент подберёт разрешённые материалы сам."}</small></div><button type="button" className="quiet" onClick={() => void openContentLibrary()}>Выбрать материалы</button></div>{selectedSourceMedia.length > 0 && <section className="source-image-edit"><label><input type="checkbox" checked={sourceImageEdit} onChange={(event) => setSourceImageEdit(event.target.checked)} /> <span><strong>Обработать выбранное фото с ИИ</strong><small>Создаст новую версию: можно ретушировать, добавить или убрать детали, добавить надписи и логотип. Оригинал останется без изменений.</small></span></label></section>}{contentLibraryOpen && renderContentLibrary(selectedSourceMedia, setSelectedSourceMedia, 10)}</>}
@@ -3026,7 +3034,22 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
       <fieldset><legend>Площадки</legend><label><input type="checkbox" name="telegram" defaultChecked />Telegram</label><label><input type="checkbox" name="max" />MAX</label><label><input type="checkbox" name="instagram" />Instagram</label></fieldset>
       <div className="content-form-actions"><button type="submit" disabled={workingId !== null}>{workingId ? "Генерирую…" : newContentFormat === "availability" ? "Сгенерировать окна" : sourceImageEdit ? "Обработать фото ИИ" : "Сгенерировать контент"}</button><button type="button" className="quiet" onClick={() => setCreating(false)}>Отмена</button></div>
     </form> : <form className="content-create-form" onSubmit={createWeek}>
-      <div className="weekly-content-entries"><strong>План публикаций</strong><p className="muted">Каждая строка — отдельная публикация. Выберите площадки и формат именно для этой публикации: пост или история. В один день можно добавить несколько материалов с разными посылами и форматами.</p>{weekEntries.map((entry, index) => <div className="weekly-content-entry" key={index}><div className="weekly-entry-main"><select aria-label="День недели" value={entry.day} onChange={(event) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, day: Number(event.target.value) } : item))}>{["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"].map((label, day) => <option key={label} value={day}>{label}</option>)}</select><div className="weekly-topic-field"><input value={entry.title} onChange={(event) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, title: event.target.value } : item))} placeholder="Тема или посыл" required /><VoiceInputButton csrfToken={session.csrf_token} compact onAppend={(spoken) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, title: appendDictatedText(item.title, spoken) } : item))} /></div><select aria-label="Основной макет" value={entry.content_format} onChange={(event) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, content_format: event.target.value as ContentFormat } : item))}><option value="post">Макет поста</option><option value="story">Вертикальный макет</option><option value="availability">Окна</option></select><select aria-label="Количество фото" value={entry.media_limit} onChange={(event) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, media_limit: Number(event.target.value) } : item))}>{[1,2,3,4,5,6,7,8,9,10].map((count) => <option key={count} value={count}>{count} фото</option>)}</select>{weekEntries.length > 1 && <button type="button" className="quiet" aria-label="Удалить строку" onClick={() => setWeekEntries((items) => items.filter((_, position) => position !== index))}>×</button>}</div><div className="weekly-platform-formats">{(["telegram", "instagram", "max"] as ContentPlatform[]).map((platform) => { const selected = entry.platforms.includes(platform); const format = entry.platform_formats[platform] || "post"; const title = platform === "telegram" ? "Telegram" : platform === "instagram" ? "Instagram" : "MAX"; return <label key={platform} className={selected ? "selected" : ""}><span><input type="checkbox" checked={selected} onChange={() => setWeekEntries((items) => items.map((item, position) => { if (position !== index) return item; const platforms = selected ? item.platforms.filter((value) => value !== platform) : [...item.platforms, platform]; const platform_formats = { ...item.platform_formats }; if (!selected) platform_formats[platform] = platform === "max" ? "post" : item.content_format === "story" ? "story" : "post"; return { ...item, platforms, platform_formats }; }))} />{title}</span>{platform === "max" ? <small>Пост</small> : <select aria-label={`${title}: формат`} disabled={!selected} value={format === "reel" ? "story" : format} onChange={(event) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, platform_formats: { ...item.platform_formats, [platform]: event.target.value as PublicationFormat } } : item))}><option value="post">Пост</option><option value="story">История</option></select>}</label>; })}</div></div>)}<button type="button" className="quiet weekly-add" onClick={() => setWeekEntries((items) => [...items, { day: 0, title: "", content_format: "post", media_limit: 1, platforms: ["telegram"], platform_formats: { telegram: "post" } }])}>＋ Ещё публикация</button></div>
+      <div className="weekly-content-entries">
+        <strong>План публикаций</strong>
+        <p className="muted">Каждая строка — отдельная публикация. Выберите площадки, формат и визуальный стиль именно для неё.</p>
+        {weekEntries.map((entry, index) => <div className="weekly-content-entry" key={index}>
+          <div className="weekly-entry-main">
+            <select aria-label="День недели" value={entry.day} onChange={(event) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, day: Number(event.target.value) } : item))}>{["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"].map((label, day) => <option key={label} value={day}>{label}</option>)}</select>
+            <div className="weekly-topic-field"><input value={entry.title} onChange={(event) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, title: event.target.value } : item))} placeholder="Тема или посыл" required /><VoiceInputButton csrfToken={session.csrf_token} compact onAppend={(spoken) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, title: appendDictatedText(item.title, spoken) } : item))} /></div>
+            <select aria-label="Основной макет" value={entry.content_format} onChange={(event) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, content_format: event.target.value as ContentFormat } : item))}><option value="post">Макет поста</option><option value="story">Вертикальный макет</option><option value="availability">Окна</option></select>
+            <select aria-label="Стиль макета" value={entry.visual_style} onChange={(event) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, visual_style: event.target.value as ContentVisualStyle } : item))}><option value="auto">Авто</option><option value="light">Светлый / белый</option><option value="dark">Тёмный / чёрный</option></select>
+            <select aria-label="Количество фото" value={entry.media_limit} onChange={(event) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, media_limit: Number(event.target.value) } : item))}>{[1,2,3,4,5,6,7,8,9,10].map((count) => <option key={count} value={count}>{count} фото</option>)}</select>
+            {weekEntries.length > 1 && <button type="button" className="quiet" aria-label="Удалить строку" onClick={() => setWeekEntries((items) => items.filter((_, position) => position !== index))}>×</button>}
+          </div>
+          <div className="weekly-platform-formats">{(["telegram", "instagram", "max"] as ContentPlatform[]).map((platform) => { const selected = entry.platforms.includes(platform); const format = entry.platform_formats[platform] || "post"; const title = platform === "telegram" ? "Telegram" : platform === "instagram" ? "Instagram" : "MAX"; return <label key={platform} className={selected ? "selected" : ""}><span><input type="checkbox" checked={selected} onChange={() => setWeekEntries((items) => items.map((item, position) => { if (position !== index) return item; const platforms = selected ? item.platforms.filter((value) => value !== platform) : [...item.platforms, platform]; const platform_formats = { ...item.platform_formats }; if (!selected) platform_formats[platform] = platform === "max" ? "post" : item.content_format === "story" ? "story" : "post"; return { ...item, platforms, platform_formats }; }))} />{title}</span>{platform === "max" ? <small>Пост</small> : <select aria-label={`${title}: формат`} disabled={!selected} value={format === "reel" ? "story" : format} onChange={(event) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, platform_formats: { ...item.platform_formats, [platform]: event.target.value as PublicationFormat } } : item))}><option value="post">Пост</option><option value="story">История</option></select>}</label>; })}</div>
+        </div>)}
+        <button type="button" className="quiet weekly-add" onClick={() => setWeekEntries((items) => [...items, { day: 0, title: "", content_format: "post", media_limit: 1, visual_style: "auto", platforms: ["telegram"], platform_formats: { telegram: "post" } }])}>＋ Ещё публикация</button>
+      </div>
       <div className="content-form-actions"><button type="submit">Добавить весь план</button><button type="button" className="quiet" onClick={() => setCreating(false)}>Отмена</button></div>
     </form>}</div>}
     {error && <p className="error">{error}</p>}

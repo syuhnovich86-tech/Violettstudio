@@ -82,24 +82,34 @@ _TAUPE = (104, 82, 70, 255)
 _TAUPE_SOFT = (166, 143, 126, 255)
 
 
-def _visual_style(topic_hint: str, instruction: str | None, *, collage: bool = False) -> str:
-    """Choose the requested brand family without relying on an image model.
+def _visual_style(
+    topic_hint: str,
+    instruction: str | None,
+    *,
+    collage: bool = False,
+    requested_style: str | None = None,
+) -> str:
+    """Resolve a visual family without letting an old note override a choice.
 
-    The editor can name a style in natural Russian.  Collages default to the
-    light editorial family because real result photos stay more legible on the
-    ivory layout; ordinary campaign imagery keeps the established dark-gold
-    family unless the editor asks otherwise.
+    ``requested_style`` comes from the explicit editor control.  It is the
+    source of truth: a light choice always produces the light editorial family
+    and a dark choice always produces the dark-gold family.  Natural-language
+    detection remains only as a backwards-compatible ``auto`` fallback.
     """
-    # A later refinement is an explicit correction of the earlier brief.  In
-    # particular, "белый стиль" must win over an old reference to gold accents
-    # or a dark sample.  Gold is an accent, not a request for a dark background.
-    fragments = re.split(r"\n\s*Уточнение редактора:\s*", f"{topic_hint}\n{instruction or ''}", flags=re.IGNORECASE)
-    for fragment in reversed(fragments):
-        text = fragment.casefold()
-        if re.search(r"бел\w*|светл|крем|молоч|беж|нюд|редакцион|editorial|light", text):
-            return "light"
-        if re.search(r"т[её]мн|ч[её]рн|графит|dark", text):
-            return "dark"
+    selected = (requested_style or "auto").strip().casefold()
+    if selected in {"light", "dark"}:
+        return selected
+
+    text = f"{topic_hint}\n{instruction or ''}".casefold()
+    asks_light = bool(re.search(r"бел\w*|светл|крем|молоч|беж|нюд|редакцион|editorial|light", text))
+    asks_dark = bool(re.search(r"т[её]мн|ч[её]рн|графит|dark", text))
+    # If the free-form brief contains both terms, it is ambiguous.  Do not try
+    # to give one word priority based on its position; preserve a stable
+    # default until the editor explicitly chooses a family in the control.
+    if asks_light and not asks_dark:
+        return "light"
+    if asks_dark and not asks_light:
+        return "dark"
     return "light" if collage else "dark"
 
 
@@ -179,8 +189,15 @@ def _generated_workspace(db: Session, actor_id: str) -> Workspace:
     return workspace
 
 
-def _visual_prompt(topic_hint: str, instruction: str, has_source: bool, *, collage: bool = False) -> str:
-    style = _visual_style(topic_hint, instruction, collage=collage)
+def _visual_prompt(
+    topic_hint: str,
+    instruction: str,
+    has_source: bool,
+    *,
+    collage: bool = False,
+    requested_style: str | None = None,
+) -> str:
+    style = _visual_style(topic_hint, instruction, collage=collage, requested_style=requested_style)
     if style == "light":
         art_direction = (
             "a genuinely light warm-ivory, milk-white, cream and sand editorial background, subtle "
@@ -716,16 +733,25 @@ def _overlay_brand_caption(
     title: str,
     instruction: str | None = None,
     copy_hint: str | None = None,
+    requested_style: str | None = None,
 ) -> bytes:
     """Add reliable readable Russian branding after image generation.
 
     Image models are not relied on for tiny Russian lettering.  The model creates
     the artistic background; Pillow adds the concise, editable studio signature.
     """
+    style = _visual_style(
+        title, instruction, collage=_wants_collage(title, instruction), requested_style=requested_style
+    )
     with Image.open(io.BytesIO(image_bytes)) as source:
-        image = ImageOps.fit(ImageOps.exif_transpose(source).convert("RGB"), (1080, 1350), method=Image.Resampling.LANCZOS)
+        source_image = ImageOps.exif_transpose(source).convert("RGB")
+    # The image model supplies the subject and atmosphere, but not the final
+    # layout.  Building the canvas locally makes the selected family a hard
+    # choice: a light request always has an ivory editorial canvas and a dark
+    # request always has a deep black/gold canvas, even when a model returns a
+    # background in the opposite colour family.
+    image = _brand_visual_canvas(source_image, style)
     draw = ImageDraw.Draw(image, "RGBA")
-    style = _visual_style(title, instruction, collage=_wants_collage(title, instruction))
     _draw_brand_lockup(draw, 52, 46, style=style)
     if style == "light":
         _draw_light_editorial_copy(draw, title, instruction, copy_hint)
@@ -747,9 +773,37 @@ def _paste_rounded(
     canvas.paste(card, (x, y), mask)
 
 
+def _brand_visual_canvas(source: Image.Image, style: str) -> Image.Image:
+    """Put generated artwork inside a deterministic light or dark art direction.
+
+    This is deliberately separate from the prompt.  A prompt can guide a model,
+    whereas this composition guarantees that the editor's explicit light/dark
+    selection remains visible in every final card.
+    """
+    if style == "light":
+        canvas = Image.new("RGB", (1080, 1350), (246, 240, 232))
+        _paste_rounded(canvas, source, (54, 172, 972, 716), 42)
+        draw = ImageDraw.Draw(canvas, "RGBA")
+        draw.rounded_rectangle(
+            (52, 170, 1028, 892), radius=44, outline=(178, 151, 127, 210), width=2
+        )
+        draw.arc((18, 986, 1050, 1528), 188, 334, fill=(182, 155, 133, 125), width=4)
+        draw.arc((-340, -254, 498, 374), 22, 160, fill=(196, 170, 146, 110), width=3)
+        return canvas
+
+    canvas = Image.new("RGB", (1080, 1350), (14, 11, 9))
+    _paste_rounded(canvas, source, (54, 146, 972, 860), 34)
+    draw = ImageDraw.Draw(canvas, "RGBA")
+    draw.rounded_rectangle(
+        (52, 144, 1028, 1010), radius=36, outline=(223, 179, 103, 205), width=2
+    )
+    draw.arc((-250, -190, 1210, 1320), 208, 48, fill=(224, 181, 106, 125), width=4)
+    return canvas
+
+
 def _before_after_collage(
     source_media: list[MediaFile], settings: Settings, title: str,
-    instruction: str | None = None, copy_hint: str | None = None,
+    instruction: str | None = None, copy_hint: str | None = None, requested_style: str | None = None,
 ) -> bytes:
     """Create a real-photo collage in the dark or light VIOLETTA design family.
 
@@ -757,7 +811,7 @@ def _before_after_collage(
     model is not asked to redraw results, so the editor never gets a plausible
     but inaccurate clinical result photo.
     """
-    style = _visual_style(title, instruction, collage=True)
+    style = _visual_style(title, instruction, collage=True, requested_style=requested_style)
     canvas = Image.new("RGB", (1080, 1350), (244, 238, 230) if style == "light" else (16, 13, 11))
     draw = ImageDraw.Draw(canvas, "RGBA")
     border = _TAUPE_SOFT if style == "light" else (233, 194, 120, 255)
@@ -855,6 +909,7 @@ def generate_branded_visual(
     force_edit: bool = False,
 ) -> MediaFile:
     """Generate or carefully edit one visual and save it in the shared output folder."""
+    selected_style = getattr(item, "visual_style", "auto")
     image_sources = [entry for entry in source_media if entry.media_type == MediaType.IMAGE][:16]
     # The order selected in the archive is meaningful: for two photos it is
     # "before" then "after". Render this locally so the client result is never
@@ -862,7 +917,9 @@ def generate_branded_visual(
     if len(image_sources) >= 2 and (not force_edit or not _requires_true_photo_edit(instruction)):
         return _save_generated_image(
             db, settings, item, actor_id, instruction,
-            _before_after_collage(image_sources, settings, item.title, instruction, copy_hint),
+            _before_after_collage(
+                image_sources, settings, item.title, instruction, copy_hint, requested_style=selected_style,
+            ),
         )
     api_key = read_openai_secret(settings)
     image_model = config_value(settings, "openai_image_model", settings.openai_image_model)
@@ -877,6 +934,7 @@ def generate_branded_visual(
         instruction,
         bool(image_sources),
         collage=collage_requested or len(image_sources) >= 2,
+        requested_style=selected_style,
     )
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
@@ -905,5 +963,7 @@ def generate_branded_visual(
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, OSError) as error:
         raise ContentAgentError("Не удалось сгенерировать изображение. Попробуйте уточнить запрос позже.") from error
 
-    final_image = _overlay_brand_caption(raw_image, item.title, instruction, copy_hint)
+    final_image = _overlay_brand_caption(
+        raw_image, item.title, instruction, copy_hint, requested_style=selected_style,
+    )
     return _save_generated_image(db, settings, item, actor_id, instruction, final_image)
