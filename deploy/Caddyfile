@@ -8,7 +8,7 @@
         X-Frame-Options "DENY"
         Referrer-Policy "no-referrer"
         Permissions-Policy "camera=(self), microphone=(self), web-share=(self), geolocation=()"
-        Content-Security-Policy "default-src 'self'; img-src 'self' data:; media-src 'self' blob:; style-src 'self'; script-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+        Content-Security-Policy "default-src 'self'; img-src 'self' data: https://*.cdninstagram.com https://*.fbcdn.net; media-src 'self' blob:; style-src 'self'; script-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
     }
     header @vkcheck {
         Strict-Transport-Security "max-age=31536000"

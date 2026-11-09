@@ -1,38 +1,39 @@
 import bridge from '@vkontakte/vk-bridge';
 const message = document.getElementById('status');
 const button = document.getElementById('test');
-const copy = document.getElementById('copy');
-let verifiedToken = null;
-copy.addEventListener('click', async () => {
- if (!verifiedToken) return;
- try { await navigator.clipboard.writeText(verifiedToken); message.textContent = 'Ключ скопирован. Вставьте его в поле «Токен VK для аналитики» в настройках студии.'; }
- catch (_) { try { await bridge.send('VKWebAppCopyText', {text: verifiedToken}); message.textContent = 'Ключ скопирован. Вставьте его в настройки аналитики студии.'; } catch (_) { message.textContent = 'Не удалось скопировать ключ. Попробуйте открыть приложение в другом браузере.'; } }
-});
-bridge.send('VKWebAppInit').catch(() => { message.textContent = 'Откройте эту страницу как мини-приложение во ВКонтакте.'; });
+const codeInput = document.getElementById('code');
+const groupInput = document.getElementById('group');
+const pause = () => new Promise(resolve => setTimeout(resolve, 400));
+const number = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+const definitions = {reach:['reach','reach'],visitors:['visitors','visitors'],views:['visitors','views'],subscribed:['activity','subscribed'],unsubscribed:['activity','unsubscribed'],likes:['activity','likes'],comments:['activity','comments'],reposts:['activity','copies']};
+async function call(method, params, token) { await pause(); const data=await bridge.send('VKWebAppCallAPIMethod',{method,params:{...params,v:'5.199',access_token:token}}); return data.response; }
+bridge.send('VKWebAppInit').catch(() => { message.textContent = 'Откройте страницу внутри мини-приложения ВКонтакте.'; });
 button.addEventListener('click', async () => {
- button.disabled = true; verifiedToken = null; copy.hidden = true; message.textContent = 'Запрашиваем разрешение…';
- let stage = 'получение прав', granted = '';
- try {
-   const auth = await bridge.send('VKWebAppGetAuthToken', {app_id: 54886089, scope: 'stats,groups'});
-   const raw = Array.isArray(auth.scope) ? auth.scope.join(',') : String(auth.scope || 'не указаны');
-   granted = raw.replace(/[^a-z_, ]/gi, '').slice(0,120);
-   stage = 'проверка сообщества';
-   const group = await bridge.send('VKWebAppCallAPIMethod', {method:'groups.getById',params:{group_id:'141350617',fields:'members_count',v:'5.199',access_token:auth.access_token}});
-   const rows = Array.isArray(group.response) ? group.response : group.response?.groups;
-   const found = Array.isArray(rows) && rows.length > 0;
-   if (!found) { message.textContent = `Сообщество не найдено в ответе VK. Выданные права: ${granted}.`; return; }
-   const admin = rows[0]?.is_admin;
-   const adminText = admin === 1 ? 'ВК подтверждает права администратора.' : admin === 0 ? 'ВК не видит права администратора.' : 'Роль в ответе не указана.';
-   stage = 'чтение статистики';
-   try {
-     const result = await bridge.send('VKWebAppCallAPIMethod', {method:'stats.get',params:{group_id:141350617,v:'5.199',access_token:auth.access_token}});
-     if (Array.isArray(result.response)) { verifiedToken = auth.access_token; copy.hidden = false; message.textContent = `Доступ подтверждён. ${adminText} Права: ${granted}. Ключ действует около часа.`; } else { message.textContent = `VK не вернул статистику в ожидаемом формате. ${adminText} Права: ${granted}.`; }
-   } catch (e) {
-     const code = e?.error_data?.error_code ?? e?.error_data?.error?.error_code ?? 'неизвестно';
-     message.textContent = `Ошибка чтения статистики: код ${String(code).replace(/[^0-9]/g,'').slice(0,8)||'неизвестно'}. ${adminText} Права: ${granted}.`;
-   }
- } catch (e) {
-   const code = e?.error_data?.error_code ?? e?.error_data?.error?.error_code ?? e?.error_data?.error ?? 'неизвестно';
-   message.textContent = `Ошибка: ${stage}, код ${String(code).replace(/[^0-9]/g,'').slice(0,8)||'неизвестно'}. ${granted ? `Выданные права: ${granted}.` : ''}`;
- } finally { button.disabled = false; }
+  const code=codeInput.value.trim(), group=groupInput.value.trim();
+  if (!code || !/^\d+$/.test(group)) { message.textContent='Введите код и ID сообщества, показанные в аналитике студии.'; return; }
+  button.disabled=true; message.textContent='Подключаем VK и загружаем показатели…';
+  try {
+    const auth=await bridge.send('VKWebAppGetAuthToken',{app_id:54886089,scope:'stats,groups'});
+    const profile=await call('groups.getById',{group_id:group,fields:'members_count'},auth.access_token);
+    const groups=Array.isArray(profile)?profile:profile?.groups;
+    if (!groups?.length || groups[0].is_admin !== 1) throw new Error('VK не подтвердил права администратора сообщества.');
+    const now=Math.floor(Date.now()/1000), periods={};
+    for (const days of [7,30,90]) {
+      const ranges=[];
+      for(const [from,to] of [[now-days*86400,now],[now-days*172800,now-days*86400]]) {
+        const rows=await call('stats.get',{group_id:Number(group),timestamp_from:from,timestamp_to:to,interval:'all',extended:1},auth.access_token);
+        if(!Array.isArray(rows)) throw new Error('VK не вернул статистику за выбранный период.');
+        ranges.push(rows[0]||{});
+      }
+      periods[String(days)]={};
+      for (const [name,[section,key]] of Object.entries(definitions)) periods[String(days)][name]={current:number(ranges[0]?.[section]?.[key]),previous:number(ranges[1]?.[section]?.[key])};
+    }
+    const raw=await call('stats.get',{group_id:Number(group),timestamp_from:now-90*86400,timestamp_to:now,interval:'day',extended:1},auth.access_token);
+    if(!Array.isArray(raw)) throw new Error('VK не вернул статистику по дням.');
+    const daily=raw.slice(-200).filter(row=>Number.isInteger(row.period_from)).map(row=>({time:row.period_from,reach:number(row.reach?.reach),visitors:number(row.visitors?.visitors),views:number(row.visitors?.views)}));
+    const res=await fetch('/api/v1/content/analytics/vk-bridge/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code,group,followers:number(groups[0].members_count),periods,daily}),credentials:'omit',cache:'no-store'});
+    if(!res.ok) throw new Error(res.status===403?'Код истёк или не подходит к сообществу. Получите новый код в аналитике студии.':'Не удалось сохранить данные на сервере студии.');
+    codeInput.value=''; message.textContent='Готово! Статистика сохранена. Вернитесь в аналитику студии и обновите страницу.';
+  } catch(e) { const n=e?.error_data?.error_code || e?.error_data?.error?.error_code; message.textContent=n?`VK вернул ошибку ${String(n).replace(/[^0-9]/g,'')}. Убедитесь, что вы администратор сообщества.`:(e instanceof Error?e.message:'Не удалось получить данные VK. Попробуйте ещё раз.'); }
+  finally {button.disabled=false;}
 });

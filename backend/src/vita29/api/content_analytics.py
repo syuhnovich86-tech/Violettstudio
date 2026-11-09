@@ -2,8 +2,11 @@
 import asyncio
 import json
 import re
+import secrets
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
+from pydantic import BaseModel, ConfigDict, Field
 
 from fastapi import APIRouter, Depends, Response, HTTPException, Query
 import httpx
@@ -18,7 +21,7 @@ from vita29.db.models import AnalyticsNote, AuthSession, User, UserRole
 from vita29.db.session import get_db
 from vita29.integrations.store import config_value, read_secret
 from vita29.content.max_publisher import max_ssl_context
-from vita29.content.vk_analytics import vk_overview
+from vita29.content.vk_analytics import vk_overview as vk_live_overview
 from vita29.content.threads_analytics import threads_overview
 from vita29.content.agent import _openai_post, _response_text, read_openai_secret
 from vita29.settings import Settings, get_settings
@@ -30,6 +33,83 @@ def require_analytics(user: Annotated[User, Depends(get_current_user)]) -> User:
     if user.role not in (UserRole.OWNER, UserRole.ADMIN) and not user.can_access_analytics:
         raise HTTPException(status_code=403, detail='Нет доступа к аналитике')
     return user
+
+
+_vk_bridge_codes = {}
+
+
+class VKBridgePair(BaseModel):
+    current: float | None = Field(default=None, ge=0, le=100000000000)
+    previous: float | None = Field(default=None, ge=0, le=100000000000)
+    model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
+
+
+async def vk_overview(settings, days=30):
+    live = await vk_live_overview(settings, days)
+    if live.get('stats_status') in ('ok', 'limited'):
+        return live
+    from vita29.content.vk_snapshots import read
+    from vita29.db.session import SessionLocal
+    try:
+        with SessionLocal() as db:
+            saved = read(db, config_value(settings, 'vk_group_id').lstrip('-'), days)
+    except Exception:
+        saved = None
+    if not saved:
+        return live
+    if live.get('posts_status') == 'ok':
+        saved['posts'] = live.get('posts', [])
+        saved['posts_status'] = 'ok'
+        saved['posts_truncated'] = live.get('posts_truncated', False)
+    return saved
+
+
+class VKBridgeDay(BaseModel):
+    time: int = Field(ge=946684800, le=4102444800)
+    reach: float | None = Field(default=None, ge=0, le=100000000000)
+    visitors: float | None = Field(default=None, ge=0, le=100000000000)
+    views: float | None = Field(default=None, ge=0, le=100000000000)
+    model_config = ConfigDict(extra='forbid', allow_inf_nan=False)
+
+
+class VKBridgeImport(BaseModel):
+    code: str = Field(min_length=20, max_length=100, repr=False)
+    group: str = Field(min_length=1, max_length=32)
+    followers: int | None = Field(default=None, ge=0, le=10000000000)
+    periods: dict[str, dict[str, VKBridgePair]]
+    daily: list[VKBridgeDay] = Field(max_length=200)
+    model_config = ConfigDict(extra='forbid')
+
+
+@router.post('/vk-bridge/start')
+def start_vk_bridge(_: Annotated[AuthSession, Depends(require_csrf)],
+                    user: Annotated[User, Depends(require_analytics)],
+                    settings: Annotated[Settings, Depends(get_settings)]):
+    group = config_value(settings, 'vk_group_id').lstrip('-')
+    if not group.isdecimal():
+        raise HTTPException(400, 'Не настроен ID сообщества VK')
+    now = time.monotonic()
+    for key in list(_vk_bridge_codes):
+        if _vk_bridge_codes[key]['expires'] < now:
+            del _vk_bridge_codes[key]
+    if len(_vk_bridge_codes) >= 100:
+        raise HTTPException(429, 'Слишком много попыток')
+    code = secrets.token_urlsafe(24)
+    _vk_bridge_codes[code] = {'group': group, 'expires': now + 600, 'user': user.id}
+    return {'code': code, 'group': group, 'expires_in': 600}
+
+
+@router.post('/vk-bridge/import')
+def import_vk_bridge(payload: VKBridgeImport, db: Annotated[Session, Depends(get_db)]):
+    attempt = _vk_bridge_codes.pop(payload.code, None)
+    if not attempt or attempt['expires'] < time.monotonic() or attempt['group'] != payload.group:
+        raise HTTPException(403, 'Код недействителен, истёк или относится к другому сообществу')
+    allowed = {'reach', 'visitors', 'views', 'subscribed', 'unsubscribed', 'likes', 'comments', 'reposts'}
+    if set(payload.periods) != {'7', '30', '90'} or any(not set(row).issubset(allowed) for row in payload.periods.values()):
+        raise HTTPException(400, 'Неверные показатели')
+    from vita29.content.vk_snapshots import save
+    data = payload.model_dump(exclude={'code', 'group'})
+    return {'saved_at': save(db, payload.group, data)}
 
 
 async def instagram_overview(settings: Settings, days: int = 30) -> dict:
@@ -49,19 +129,35 @@ async def instagram_overview(settings: Settings, days: int = 30) -> dict:
             if profile.status_code != 200:
                 return {'status': 'error', 'message': 'Не удалось получить данные Instagram. Проверьте подключение.'}
             data = profile.json()
-            media_response = await client.get(f'/{account}/media', params={'fields': 'id,caption,media_type,media_product_type,timestamp,like_count,comments_count,permalink,thumbnail_url,media_url', 'limit': 100})
             media = []
             earliest = datetime.now(UTC) - timedelta(days=days)
-            if media_response.status_code == 200:
-                for item in media_response.json().get('data', []):
+            cursor = None
+            media_truncated = False
+            for page_number in range(5):
+                params = {'fields': 'id,caption,media_type,media_product_type,timestamp,like_count,comments_count,permalink,thumbnail_url,media_url', 'limit': 100}
+                if cursor:
+                    params['after'] = cursor
+                media_response = await client.get(f'/{account}/media', params=params)
+                if media_response.status_code != 200:
+                    media_truncated = True
+                    break
+                payload = media_response.json()
+                page_items = payload.get('data', [])
+                reached_earliest = False
+                for item in page_items:
                     try:
                         published = datetime.fromisoformat(item['timestamp'].replace('Z', '+00:00'))
                     except (KeyError, ValueError, TypeError):
                         continue
                     if published >= earliest:
                         media.append({key: item.get(key) for key in ('id', 'caption', 'media_type', 'media_product_type', 'timestamp', 'like_count', 'comments_count', 'permalink', 'thumbnail_url', 'media_url')})
-            total_available = len(media)
-            media = media[:30]
+                    else:
+                        reached_earliest = True
+                cursor = (payload.get('paging') or {}).get('cursors', {}).get('after') if (payload.get('paging') or {}).get('next') else None
+                if not cursor or reached_earliest:
+                    break
+                if page_number == 4:
+                    media_truncated = True
             end = int(datetime.now(UTC).timestamp())
             ranges = []
             while len(ranges) * 29 < days * 2:
@@ -104,10 +200,18 @@ async def instagram_overview(settings: Settings, days: int = 30) -> dict:
                         values[entry.get('name')] = value
                 item['insights'] = values
             await asyncio.gather(
-                *(add_insights(item, 'views,reach,saved,shares,total_interactions') for item in media),
+                *(add_insights(item, 'views,reach,saved,shares,total_interactions') for item in media[:40]),
                 *(add_insights(item, 'views,reach,replies,shares,total_interactions') for item in stories),
             )
-            return {'status': 'ok', 'updated_at': datetime.now(UTC).isoformat(), 'followers': data.get('followers_count'), 'media': media, 'media_truncated': total_available > len(media) or bool(media_response.json().get('paging', {}).get('next')), 'stories': stories, 'stories_status': 'ok' if stories_response.status_code == 200 else 'unavailable', 'reach': [{'values': [{'end_time': key, 'value': value} for key, value in sorted(points.items())]}], 'reach_partial': any(result.status_code != 200 for result in responses)}
+            try:
+                from vita29.content.instagram_history import merge_instagram_media
+                from vita29.db.session import SessionLocal
+                with SessionLocal() as db:
+                    media = merge_instagram_media(db, account, media, days)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).exception('Instagram media history unavailable')
+            return {'status': 'ok', 'updated_at': datetime.now(UTC).isoformat(), 'followers': data.get('followers_count'), 'media': media, 'media_truncated': media_truncated, 'media_insights_truncated': len(media) > 40, 'stories': stories, 'stories_status': 'ok' if stories_response.status_code == 200 else 'unavailable', 'reach': [{'values': [{'end_time': key, 'value': value} for key, value in sorted(points.items())]}], 'reach_partial': any(result.status_code != 200 for result in responses)}
     except (httpx.HTTPError, ValueError):
         return {'status': 'error', 'message': 'Не удалось получить данные Instagram. Повторите попытку позже.'}
 

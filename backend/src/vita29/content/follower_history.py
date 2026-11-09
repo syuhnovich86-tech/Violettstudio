@@ -24,9 +24,15 @@ def record_and_compare(session_factory, settings, data, days, now=None):
             if not account or not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
                 continue
             # One observation per hour; stable account identifier prevents mixing accounts.
-            observed = now.replace(minute=0, second=0, microsecond=0).isoformat()
+            item_now = now
+            if item.get('source') == 'vk_bridge':
+                try:
+                    item_now = datetime.fromisoformat(item['updated_at'])
+                except (KeyError, TypeError, ValueError):
+                    continue
+            observed = item_now.replace(minute=0, second=0, microsecond=0).isoformat()
             db.execute(text('INSERT INTO analytics_follower_snapshots (platform, account_id, observed_at, followers) VALUES (:p,:a,:t,:v) ON CONFLICT (platform, account_id, observed_at) DO UPDATE SET followers=excluded.followers'), {'p': name, 'a': str(account), 't': observed, 'v': int(value)})
-            target = now - timedelta(days=days)
+            target = item_now - timedelta(days=days)
             baseline = db.execute(text('SELECT observed_at, followers FROM analytics_follower_snapshots WHERE platform=:p AND account_id=:a AND observed_at <= :t ORDER BY observed_at DESC LIMIT 1'), {'p': name, 'a': str(account), 't': target.isoformat()}).first()
             # A missing interval cannot be represented as an exact period comparison.
             if baseline and datetime.fromisoformat(baseline.observed_at) >= target - timedelta(hours=30):
