@@ -13,6 +13,7 @@ from vita29.api.content_analytics import router as content_analytics_router
 from vita29.api.discussions import router as discussions_router
 from vita29.api.health import router as health_router
 from vita29.api.integrations import router as integrations_router
+from vita29.api.vkid_diagnostic import router as vkid_diagnostic_router
 from vita29.api.telegram_story_login import router as telegram_story_login_router
 from vita29.api.max_story_login import router as max_story_login_router
 from vita29.api.media import router as media_router
@@ -26,6 +27,18 @@ from vita29.api.users import router as users_router
 from vita29.api.workspaces import router as workspaces_router
 from vita29.api.yclients import router as yclients_router
 from vita29.settings import get_settings
+
+
+class _VKIDAccessLogFilter(logging.Filter):
+    def filter(self, record):
+        args = record.args
+        if isinstance(args, tuple) and len(args) == 5 and isinstance(args[2], str):
+            if args[2].startswith("/api/v1/integrations/vkid/callback?"):
+                record.args = (*args[:2], "/api/v1/integrations/vkid/callback", *args[3:])
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_VKIDAccessLogFilter())
 
 
 @asynccontextmanager
@@ -84,6 +97,7 @@ app = FastAPI(title="Vita29 Files", version="0.1.0", lifespan=lifespan)
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(android_import_chunks_router, prefix="/api/v1")
 app.include_router(integrations_router, prefix="/api/v1")
+app.include_router(vkid_diagnostic_router, prefix="/api/v1")
 app.include_router(telegram_story_login_router, prefix="/api/v1")
 app.include_router(max_story_login_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
