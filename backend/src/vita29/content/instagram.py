@@ -4,6 +4,7 @@ Meta downloads media itself, therefore this module creates revocable HTTPS URLs
 only for the duration of the upload/publish transaction.
 """
 
+import json
 import time
 from typing import Any
 
@@ -24,6 +25,10 @@ class InstagramPublishError(RuntimeError):
     """A safe message for the editor when Meta declines a publication."""
 
 
+class InstagramNotPublishedError(InstagramPublishError):
+    """Meta failed before any publish request was sent."""
+
+
 _GRAPH_BASE = "https://graph.facebook.com/v22.0"
 
 
@@ -36,12 +41,15 @@ def _call(method: str, path: str, *, token: str, timeout: float, **kwargs: Any) 
             params={"access_token": token, **kwargs.pop("params", {})},
             data=kwargs.pop("data", None),
         )
-        response.raise_for_status()
         payload = response.json()
+        if payload.get("error"):
+            error = payload["error"]
+            if error.get("error_subcode") in {2207052, 2207076, 2207077}:
+                raise InstagramPublishError("Instagram не смог загрузить или обработать файл. Проверьте доступность файла и формат.")
+            raise InstagramPublishError("Instagram отклонил запрос. Проверьте подключение, права аккаунта и формат файла.")
+        response.raise_for_status()
     except (httpx.HTTPError, ValueError) as error:
         raise InstagramPublishError("Instagram не принял публикацию. Проверьте подключение Meta и повторите попытку.") from error
-    if payload.get("error"):
-        raise InstagramPublishError("Instagram отклонил публикацию. Проверьте токен, права аккаунта и формат файла.")
     return payload
 
 
@@ -69,6 +77,7 @@ def publish_to_instagram(
     media_files: list[MediaFile],
 ) -> str:
     """Create Meta containers, publish them, then invalidate every delivery URL."""
+    publish_started = False
     try:
         token = read_secret(
             settings, "instagram_access_token", settings.integration_secrets_path / "unused", "Instagram access token"
@@ -90,9 +99,30 @@ def publish_to_instagram(
         db.commit()
 
         format_name = publication.publication_format
+        if format_name == "story" and len(media_files) > 1:
+            published_ids = []
+            for media, url in zip(media_files, delivery_urls, strict=True):
+                payload = {"media_type": "STORIES", "image_url" if media.media_type == MediaType.IMAGE else "video_url": url}
+                container = _call("POST", f"/{account_id}/media", token=token, timeout=settings.openai_http_timeout_seconds, data=payload)
+                creation_id = str(container.get("id") or "")
+                if not creation_id:
+                    raise InstagramPublishError("Instagram не подготовил одну из историй")
+                _wait_until_ready(creation_id, token=token, timeout=settings.openai_http_timeout_seconds)
+                publish_started = True
+                published = _call("POST", f"/{account_id}/media_publish", token=token, timeout=settings.openai_http_timeout_seconds, data={"creation_id": creation_id})
+                result_id = str(published.get("id") or "")
+                if not result_id:
+                    raise InstagramPublishError("Instagram не подтвердил одну из историй")
+                published_ids.append(result_id)
+                # Persist each confirmation so a partial or interrupted send is never retried blindly.
+                publication.external_id = json.dumps(published_ids)
+                db.commit()
+            revoke_public_links(db, publication)
+            db.commit()
+            return json.dumps(published_ids)
         if len(media_files) == 1:
             media = media_files[0]
-            payload: dict[str, str] = {"caption": caption}
+            payload: dict[str, str] = {} if format_name == "story" else {"caption": caption}
             if media.media_type == MediaType.IMAGE:
                 payload["image_url"] = delivery_urls[0]
                 if format_name == "story":
@@ -133,6 +163,7 @@ def publish_to_instagram(
                 raise InstagramPublishError("Instagram не подготовил карусель")
             _wait_until_ready(creation_id, token=token, timeout=settings.openai_http_timeout_seconds)
 
+        publish_started = True
         published = _call(
             "POST", f"/{account_id}/media_publish", token=token, timeout=settings.openai_http_timeout_seconds,
             data={"creation_id": creation_id},
@@ -146,9 +177,12 @@ def publish_to_instagram(
     except (IntegrationConfigurationError, PublicMediaLinkError) as error:
         revoke_public_links(db, publication)
         db.commit()
-        raise InstagramPublishError(str(error)) from error
-    except Exception:
+        raise InstagramNotPublishedError(str(error)) from error
+    except Exception as error:
         # A failed Meta transaction must not leave a URL usable until expiry.
         revoke_public_links(db, publication)
         db.commit()
+        if not publish_started:
+            detail = str(error) if isinstance(error, InstagramPublishError) else "Не удалось подготовить материал для Instagram."
+            raise InstagramNotPublishedError(detail) from error
         raise

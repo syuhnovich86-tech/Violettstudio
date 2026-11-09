@@ -24,23 +24,22 @@ def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
-def _fit_slot_line(times: object, width: int) -> tuple[str, ImageFont.FreeTypeFont] | None:
-    """Return a large, readable time line that cannot touch the template star.
+def _fit_times(times: object, width: int) -> tuple[str, ImageFont.FreeTypeFont] | None:
+    """Return one complete fitted line that cannot leave its template row.
 
-    A card is meant to be read in Stories.  Two nearest one-hour windows are
-    substantially more useful than a tiny, unreadable list of every opening.
-    The date is painted separately to the right of the outlined row.
+    The left field is reserved for time values; the date is rendered in the
+    adjacent zone on the same row.
     """
     values = [str(value) for value in times] if isinstance(times, list) else []
     values = [value for value in values if value][:2]
     if not values:
         return None
-    text = "/".join(values)
-    for size in range(50, 31, -2):
+    text = " / ".join(values)
+    for size in range(52, 27, -2):
         font = _font(size, bold=False)
         if font.getlength(text) <= width:
             return text, font
-    return text, _font(30, bold=False)
+    return text, _font(28, bold=False)
 
 
 def _draw_centered(
@@ -62,57 +61,45 @@ def _draw_centered(
     draw.text((x, y), text, font=font, fill=fill)
 
 
-def draw_availability_overlay(
-    image: Image.Image,
-    slots: list[dict[str, object]],
-    *,
-    template_label: str = "",
-) -> Image.Image:
-    """Paint date and free times into the fixed rows of a studio master card.
+# Row centres and spacing were measured independently for each approved template.
+# Coordinates are proportions of the template, not screen pixels.
+_TEMPLATE_ROWS = {
+    "36419.png": (259.5 / 690, 45.0 / 690),
+    "36418.png": (249.5 / 690, 46.4 / 690),
+    "36417.png": (246.5 / 690, 47.0 / 690),
+    "36416.png": (235.5 / 690, 47.0 / 690),
+    "36426.png": (242.5 / 690, 46.7 / 690),
+    "36427.png": (248.0 / 690, 46.7 / 690),
+}
 
-    Most staff templates share one 9:16 geometry.  The Вероника and Светлана
-    косметолог layouts have their weekday grid slightly higher, so their
-    profile is calibrated separately.  Keeping the renderer deterministic
-    avoids generated text drifting outside a row.
-    """
+
+def draw_availability_overlay(image: Image.Image, slots: list[dict[str, object]], template_name: str) -> Image.Image:
+    """Place each date and up to two times inside its own weekday frame."""
+    geometry = _TEMPLATE_ROWS.get(template_name)
+    if geometry is None:
+        raise ValueError("Разметка этого шаблона свободных окон ещё не настроена")
     draw = ImageDraw.Draw(image)
     width, height = image.size
-    by_date: dict[str, list[str]] = {}
+    text_left = int(width * .073)
+    text_right = int(width * .404)
     for slot in slots:
-        day = str(slot.get("date") or "")
-        times = slot.get("times")
-        if day and isinstance(times, list):
-            by_date[day] = [str(value) for value in times]
-
-    # These coordinates are measured on the approved 1080×1920 master and
-    # then scaled.  `field_right` stops just before the decorative star.
-    field_left = int(width * 0.068)
-    field_right = int(width * 0.357)
-    field_center_x = (field_left + field_right) // 2
-    label = template_label.casefold()
-    raised_grid = "вероник" in label or ("светлан" in label and "космет" in label)
-    # On two layouts the empty outlined rows start 35 px higher on a 1672 px
-    # source image.  Without this correction the large text is centred in the
-    # gap under the row instead of inside it.
-    first_row_center_y = int(height * (0.354 if raised_grid else 0.375))
-    row_step = int(height * 0.0658)
-    date_center_x = int(width * 0.505)
-    date_font = _font(max(24, int(width * 0.043)), bold=False)
-
-    for day, times in sorted(by_date.items()):
         try:
-            index = date.fromisoformat(day).weekday()
+            day = date.fromisoformat(str(slot.get("date") or ""))
         except ValueError:
             continue
-        fitted = _fit_slot_line(times, field_right - field_left - int(width * 0.016))
-        if fitted is None:
+        raw = slot.get("times")
+        times = [str(value).strip() for value in raw if value][:2] if isinstance(raw, list) else []
+        if not times:
             continue
-        text, time_font = fitted
-        row_y = first_row_center_y + index * row_step
-        _draw_centered(draw, text, time_font, field_center_x, row_y)
-        # The date belongs to the right of its own weekday row, never inside
-        # the time field.  Leading zeroes remove ambiguity across months.
-        _draw_centered(draw, f"{day[8:10]}.{day[5:7]}", date_font, date_center_x, row_y)
+        text = f"{day:%d.%m}  {' / '.join(times)}"
+        for size in range(max(12, int(width * .041)), 9, -1):
+            font = _font(size, bold=False)
+            if font.getlength(text) <= text_right - text_left:
+                break
+        else:
+            raise ValueError("Время не помещается в шаблон свободных окон")
+        _draw_centered(draw, text, font, (text_left + text_right) // 2,
+                       round(height * (geometry[0] + day.weekday() * geometry[1])))
     return image
 
 
@@ -193,11 +180,7 @@ def render_availability_image(
     temporary = target.with_suffix(".tmp")
     with Image.open(source) as raw:
         image = ImageOps.exif_transpose(raw).convert("RGB")
-        image = draw_availability_overlay(
-            image,
-            slots,
-            template_label=f"{template.original_name} {template.comment or ''}",
-        )
+        image = draw_availability_overlay(image, slots, template.original_name)
         image.save(temporary, format="JPEG", quality=94, optimize=True)
     temporary.replace(target)
     thumbnail_path(settings, generated.id).unlink(missing_ok=True)

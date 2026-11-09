@@ -25,6 +25,16 @@ class Base(DeclarativeBase):
     pass
 
 
+class AnalyticsNote(Base):
+    __tablename__ = 'analytics_notes'
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
+    author_id: Mapped[str] = mapped_column(String(36), ForeignKey('users.id'), nullable=False)
+    platform: Mapped[str] = mapped_column(String(20), nullable=False)
+    days: Mapped[int] = mapped_column(Integer, nullable=False)
+    result_json: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class UserRole(str, enum.Enum):
     OWNER = "owner"
     ADMIN = "admin"
@@ -68,6 +78,8 @@ class PublicationPlatform(str, enum.Enum):
     TELEGRAM = "telegram"
     MAX = "max"
     INSTAGRAM = "instagram"
+    VK = "vk"
+    THREADS = "threads"
 
 
 class PublicationStatus(str, enum.Enum):
@@ -89,13 +101,16 @@ class User(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     can_create_shared_workspaces: Mapped[bool] = mapped_column(Boolean, default=True)
     can_create_private_workspaces: Mapped[bool] = mapped_column(Boolean, default=False)
+    can_delete_workspaces: Mapped[bool] = mapped_column(Boolean, default=False)
     can_add_comments: Mapped[bool] = mapped_column(Boolean, default=True)
     can_upload_media: Mapped[bool] = mapped_column(Boolean, default=True)
     can_view_all_calendars: Mapped[bool] = mapped_column(Boolean, default=False)
     can_access_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     can_access_chats: Mapped[bool] = mapped_column(Boolean, default=True)
     can_access_content: Mapped[bool] = mapped_column(Boolean, default=False)
+    can_access_analytics: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     can_import_ios_photo_library: Mapped[bool] = mapped_column(Boolean, default=False)
+    can_import_android_photo_library: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now
@@ -136,6 +151,11 @@ class Workspace(Base):
     kind: Mapped[WorkspaceKind] = mapped_column(Enum(WorkspaceKind), index=True)
     owner_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+    # Workspaces are kept for audit/history after deletion, but are hidden from
+    # all ordinary listings and cannot be selected for new uploads.
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
 
     owner: Mapped[User] = relationship(back_populates="owned_workspaces", foreign_keys=[owner_id])
     members: Mapped[list["WorkspaceMember"]] = relationship(
@@ -190,6 +210,7 @@ class MediaFile(Base):
     workspace_id: Mapped[str] = mapped_column(ForeignKey("workspaces.id"), index=True)
     uploaded_by_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     storage_key: Mapped[str] = mapped_column(String(255), unique=True)
+    ios_import_key: Mapped[str | None] = mapped_column(String(64), nullable=True, unique=True)
     original_name: Mapped[str] = mapped_column(String(255))
     media_type: Mapped[MediaType] = mapped_column(Enum(MediaType))
     mime_type: Mapped[str] = mapped_column(String(100))
@@ -417,6 +438,24 @@ class PushSubscription(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
 
+class MobilePushToken(Base):
+    __tablename__ = "mobile_push_token"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    session_id: Mapped[str] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    token: Mapped[str] = mapped_column(Text, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
+
+
+class MobilePushDelivery(Base):
+    __tablename__ = "mobile_push_delivery"
+
+    notification_id: Mapped[str] = mapped_column(ForeignKey("notification.id", ondelete="CASCADE"), primary_key=True)
+    token_id: Mapped[str] = mapped_column(ForeignKey("mobile_push_token.id", ondelete="CASCADE"), primary_key=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class ContentItem(Base):
     __tablename__ = "content_item"
 
@@ -440,6 +479,7 @@ class ContentItem(Base):
     availability_slots_json: Mapped[str] = mapped_column(Text, default="[]")
     status: Mapped[ContentStatus] = mapped_column(Enum(ContentStatus), default=ContentStatus.DRAFT, index=True)
     scheduled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    publication_date_assigned: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true")
     media_ids_json: Mapped[str] = mapped_column(Text, default="[]")
     created_by_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"), index=True)
     approved_by_id: Mapped[str | None] = mapped_column(
@@ -466,14 +506,25 @@ class ContentPublication(Base):
     )
     caption: Mapped[str | None] = mapped_column(Text, nullable=True)
     media_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    media_override_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
 
     __table_args__ = (
-        Index("uq_content_publication_item_platform", "content_item_id", "platform", unique=True),
+        Index("uq_content_publication_item_platform_format", "content_item_id", "platform", "publication_format", unique=True),
     )
+
+
+class ScheduledPublicationJob(Base):
+    __tablename__ = "scheduled_publication_job"
+
+    publication_id: Mapped[str] = mapped_column(ForeignKey("content_publication.id", ondelete="CASCADE"), primary_key=True)
+    approved_by_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    state: Mapped[str] = mapped_column(String(16), default="queued", index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
 
 
 class TemporaryPublicMediaLink(Base):

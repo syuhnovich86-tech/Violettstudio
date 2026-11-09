@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     yclients_application_id: int = Field(default=49434, ge=1)
     yclients_api_base_url: str = "https://api.yclients.com"
     yclients_public_base_url: str = "https://31-10-64-46.sslip.io"
+    mobile_android_public_base_url: str = "https://vita29.taild51e5c.ts.net"
     # Kept separate from YCLIENTS because Meta must fetch originals directly
     # from a public HTTPS URL, never from a user's authenticated session.
     public_base_url: str = "https://31-10-64-46.sslip.io"
@@ -40,6 +41,8 @@ class Settings(BaseSettings):
     yclients_http_timeout_seconds: float = Field(default=15.0, gt=0, le=60)
     vapid_private_key_file: Path = Path("/run/secrets/vapid_private.pem")
     vapid_subject: str = "https://31-10-64-46.sslip.io"
+    fcm_service_account_file: Path = Path("/run/secrets/fcm-service-account.json")
+    fcm_project_id: str = "violetta-studio"
     openai_api_key_file: Path = Path("/run/secrets/openai_api_key")
     openai_content_model: str = "gpt-6-luna"
     # Banner generation is deliberately separate from the copy-writing model.

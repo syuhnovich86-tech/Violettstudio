@@ -6,7 +6,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from vita29.auth.dependencies import get_current_user, require_csrf, require_owner
@@ -195,6 +195,7 @@ def calendar_users(
     query = (
         select(YclientsStaffMapping, User)
         .join(User, User.id == YclientsStaffMapping.user_id)
+        .where(User.is_active.is_(True))
         .order_by(User.display_name)
     )
     if not can_view_all_calendars(user):
@@ -218,6 +219,8 @@ def calendar_visits(
     target_user_id = user.id if not can_view_all_calendars(user) else user_id
     query = select(YclientsVisit).where(
         YclientsVisit.deleted.is_(False),
+        YclientsVisit.staff_id.not_in(select(YclientsStaffMapping.staff_id).join(User, User.id == YclientsStaffMapping.user_id).where(User.is_active.is_(False))),
+        or_(YclientsVisit.user_id.is_(None), YclientsVisit.user_id.in_(select(User.id).where(User.is_active.is_(True)))),
         func.date(YclientsVisit.starts_at) >= start_date.isoformat(),
         func.date(YclientsVisit.starts_at) <= end_date.isoformat(),
     )

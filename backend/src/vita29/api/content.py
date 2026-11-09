@@ -4,12 +4,15 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from vita29.auth.dependencies import require_content_access, require_csrf
+from vita29.content.archive import archive_file, can_view_archive_media, snapshot_file, snapshot_publication
+from vita29.api.media import upload_media
 from vita29.content.agent import (
     ContentAgentError,
     ensure_openai_response,
@@ -39,6 +42,7 @@ from vita29.db.models import (
     MediaType,
     PublicationPlatform,
     PublicationStatus,
+    ScheduledPublicationJob,
     User,
     Workspace,
     WorkspaceKind,
@@ -47,7 +51,7 @@ from vita29.db.models import (
     utc_now,
 )
 from vita29.db.session import get_db
-from vita29.settings import get_settings
+from vita29.settings import Settings, get_settings
 from vita29.workspaces.access import can_access_workspace
 from vita29.yclients.client import YclientsClient, YclientsError, get_yclients_client
 
@@ -61,6 +65,7 @@ class ContentPublicationResponse(BaseModel):
     status: PublicationStatus
     caption: str | None
     media_ids: list[str]
+    media_override_ids: list[str] | None = None
     external_id: str | None
     error: str | None
     published_at: datetime | None
@@ -79,6 +84,7 @@ class ContentItemResponse(BaseModel):
     availability_slots: list[dict[str, object]]
     status: ContentStatus
     scheduled_at: datetime
+    publication_date_assigned: bool
     media_ids: list[str]
     created_by_id: str
     approved_by_id: str | None
@@ -88,6 +94,48 @@ class ContentItemResponse(BaseModel):
     updated_at: datetime
 
 
+class ArchiveEntry(BaseModel):
+    publication_id: str
+    item_id: str
+    title: str
+    description: str | None
+    platform: PublicationPlatform
+    publication_format: str
+    published_at: datetime
+    media_ids: list[str]
+    preview_media_id: str | None
+    platforms: list[PublicationPlatform] = Field(default_factory=list)
+
+
+class ArchivePage(BaseModel):
+    items: list[ArchiveEntry]
+    next_offset: int | None
+
+
+class ArchiveReuseRequest(BaseModel):
+    platforms: list[PublicationPlatform] = Field(min_length=1, max_length=5)
+
+
+def validate_platform_formats(value):
+    supported = {
+        PublicationPlatform.TELEGRAM: {"post", "story"},
+        PublicationPlatform.MAX: {"post", "story"},
+        PublicationPlatform.INSTAGRAM: {"post", "story", "reel"},
+        PublicationPlatform.VK: {"post"},
+        PublicationPlatform.THREADS: {"post"},
+    }
+    for platform, formats in value.items():
+        choices = [formats] if isinstance(formats, str) else formats
+        if not choices or len(choices) != len(set(choices)) or any(choice not in supported[platform] for choice in choices):
+            raise ValueError("Недопустимый формат площадки")
+    return value
+
+
+def selected_formats(formats, platform):
+    value = formats.get(platform, "post")
+    return [value] if isinstance(value, str) else value
+
+
 class ContentItemCreate(BaseModel):
     title: str = Field(min_length=2, max_length=180)
     caption: str | None = Field(default=None, max_length=5000)
@@ -95,8 +143,9 @@ class ContentItemCreate(BaseModel):
     visual_edit_requested: bool = False
     visual_style: Literal["auto", "light", "dark"] = "auto"
     scheduled_at: datetime
+    publication_date_assigned: bool = True
     platforms: list[PublicationPlatform] = Field(min_length=1)
-    platform_formats: dict[PublicationPlatform, str] = Field(default_factory=dict)
+    platform_formats: dict[PublicationPlatform, str | list[str]] = Field(default_factory=dict)
     media_ids: list[str] = Field(default_factory=list, max_length=10)
     content_format: ContentFormat = ContentFormat.POST
     media_limit: int = Field(default=1, ge=1, le=10)
@@ -109,11 +158,8 @@ class ContentItemCreate(BaseModel):
 
     @field_validator("platform_formats")
     @classmethod
-    def valid_platform_formats(cls, value: dict[PublicationPlatform, str]) -> dict[PublicationPlatform, str]:
-        for platform, format_name in value.items():
-            if format_name not in {"post", "story", "reel"} or (platform == PublicationPlatform.MAX and format_name != "post"):
-                raise ValueError("Недопустимый формат площадки")
-        return value
+    def valid_platform_formats(cls, value):
+        return validate_platform_formats(value)
 
 
 class ContentItemUpdate(BaseModel):
@@ -124,8 +170,9 @@ class ContentItemUpdate(BaseModel):
     visual_style: Literal["auto", "light", "dark"] | None = None
     append_editor_instruction: bool = False
     scheduled_at: datetime | None = None
+    publication_date_assigned: bool | None = None
     platforms: list[PublicationPlatform] | None = Field(default=None, min_length=1)
-    platform_formats: dict[PublicationPlatform, str] | None = None
+    platform_formats: dict[PublicationPlatform, str | list[str]] | None = None
     media_ids: list[str] | None = Field(default=None, max_length=10)
     content_format: ContentFormat | None = None
     media_limit: int | None = Field(default=None, ge=1, le=10)
@@ -139,21 +186,20 @@ class ContentItemUpdate(BaseModel):
 
     @field_validator("platform_formats")
     @classmethod
-    def valid_platform_formats(cls, value: dict[PublicationPlatform, str] | None) -> dict[PublicationPlatform, str] | None:
-        if value is None:
-            return value
-        for platform, format_name in value.items():
-            if format_name not in {"post", "story", "reel"} or (platform == PublicationPlatform.MAX and format_name != "post"):
-                raise ValueError("Недопустимый формат площадки")
-        return value
+    def valid_platform_formats(cls, value):
+        return validate_platform_formats(value) if value is not None else None
 
 
 class ContentPlanCreate(BaseModel):
     items: list[ContentItemCreate] = Field(min_length=1, max_length=100)
 
 
+class ContentPlanStart(BaseModel):
+    item_ids: list[str] = Field(min_length=1, max_length=100)
+
+
 class PublicationCaptionUpdate(BaseModel):
-    caption: str = Field(min_length=1, max_length=4000)
+    caption: str | None = Field(default=None, max_length=4000)
 
 
 class AvailabilityStaffResponse(BaseModel):
@@ -274,10 +320,11 @@ def content_media_library(
     search: Annotated[str | None, Query(max_length=160)] = None,
     limit: Annotated[int, Query(ge=1, le=120)] = 60,
     offset: Annotated[int, Query(ge=0)] = 0,
+    sort: Literal["priority", "recent"] = "priority",
 ) -> ContentLibraryResponse:
     """List only media the editor can access and is permitted to publish."""
     accessible_workspaces = [
-        workspace for workspace in db.scalars(select(Workspace).order_by(Workspace.display_name)).all()
+        workspace for workspace in db.scalars(select(Workspace).where(Workspace.deleted_at.is_(None)).order_by(Workspace.display_name)).all()
         if can_access_workspace(db, workspace, user)
     ]
     accessible_ids = [workspace.id for workspace in accessible_workspaces]
@@ -296,14 +343,16 @@ def content_media_library(
         needle = f"%{search.strip()}%"
         filters.append(or_(MediaFile.original_name.ilike(needle), MediaFile.comment.ilike(needle)))
     total = db.scalar(select(func.count(MediaFile.id)).where(*filters)) or 0
-    files = db.scalars(
-        select(MediaFile)
-        .join(Workspace, MediaFile.workspace_id == Workspace.id)
-        .where(*filters)
-        .order_by(MediaFile.content_marked.desc(), MediaFile.captured_at.desc(), MediaFile.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-    ).all()
+    query = select(MediaFile).join(Workspace, MediaFile.workspace_id == Workspace.id).where(*filters)
+    if sort == "recent":
+        last_moves = (select(AuditLog.target_id.label("media_id"), func.max(AuditLog.created_at).label("moved_at"))
+                      .where(AuditLog.action == "media.move", AuditLog.target_type == "media_file")
+                      .group_by(AuditLog.target_id).subquery())
+        query = (query.outerjoin(last_moves, last_moves.c.media_id == MediaFile.id)
+                 .order_by(func.coalesce(last_moves.c.moved_at, MediaFile.created_at).desc(), MediaFile.id.desc()))
+    else:
+        query = query.order_by(MediaFile.content_marked.desc(), MediaFile.captured_at.desc(), MediaFile.created_at.desc(), MediaFile.id.desc())
+    files = db.scalars(query.offset(offset).limit(limit)).all()
     return ContentLibraryResponse(
         items=[ContentLibraryMediaResponse(
             id=file.id,
@@ -360,6 +409,8 @@ def list_availability_staff(
     # the picker: selecting them would inevitably produce a misleading card.
     available: list[AvailabilityStaffResponse] = []
     for item in mappings:
+        if item.user is None or not item.user.is_active:
+            continue
         try:
             template_for_staff(db, item.staff_id, mappings)
         except ContentAgentError:
@@ -372,6 +423,12 @@ def list_availability_staff(
             )
         )
     return available
+
+
+def response_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 def response_for(db: Session, item: ContentItem) -> ContentItemResponse:
@@ -400,14 +457,15 @@ def response_for(db: Session, item: ContentItem) -> ContentItemResponse:
         availability_staff_id=item.availability_staff_id,
         availability_slots=availability_slots if isinstance(availability_slots, list) else [],
         status=item.status,
-        scheduled_at=item.scheduled_at,
+        scheduled_at=response_utc(item.scheduled_at),
+        publication_date_assigned=item.publication_date_assigned,
         media_ids=media_ids if isinstance(media_ids, list) else [],
         created_by_id=item.created_by_id,
         approved_by_id=item.approved_by_id,
-        approved_at=item.approved_at,
+        approved_at=response_utc(item.approved_at),
         publications=[publication_response(publication) for publication in publications],
-        created_at=item.created_at,
-        updated_at=item.updated_at,
+        created_at=response_utc(item.created_at),
+        updated_at=response_utc(item.updated_at),
     )
 
 
@@ -416,16 +474,21 @@ def publication_response(publication: ContentPublication) -> ContentPublicationR
         media_ids = json.loads(publication.media_ids_json)
     except (TypeError, json.JSONDecodeError):
         media_ids = []
+    try:
+        override_ids = json.loads(publication.media_override_ids_json) if publication.media_override_ids_json is not None else None
+    except (TypeError, json.JSONDecodeError):
+        override_ids = None
     return ContentPublicationResponse(
         id=publication.id,
         platform=publication.platform,
         publication_format=publication.publication_format,
+        media_override_ids=override_ids if isinstance(override_ids, list) else None,
         status=publication.status,
         caption=publication.caption,
         media_ids=media_ids if isinstance(media_ids, list) else [],
         external_id=publication.external_id,
         error=publication.error,
-        published_at=publication.published_at,
+        published_at=response_utc(publication.published_at),
     )
 
 
@@ -437,17 +500,20 @@ def get_item(db: Session, item_id: str) -> ContentItem:
 
 
 def get_publication(
-    db: Session, item: ContentItem, platform: PublicationPlatform
+    db: Session, item: ContentItem, platform: PublicationPlatform, publication_id: str | None = None
 ) -> ContentPublication:
-    publication = db.scalar(
-        select(ContentPublication).where(
+    query = select(ContentPublication).where(
             ContentPublication.content_item_id == item.id,
             ContentPublication.platform == platform,
         )
-    )
-    if publication is None:
+    if publication_id:
+        query = query.where(ContentPublication.id == publication_id)
+    publications = db.scalars(query).all()
+    if not publications:
         raise HTTPException(status_code=404, detail="This platform is not selected for the topic")
-    return publication
+    if len(publications) > 1:
+        raise HTTPException(status_code=409, detail="Выберите конкретный формат публикации")
+    return publications[0]
 
 
 def update_item_status_after_publication(db: Session, item: ContentItem) -> None:
@@ -470,7 +536,9 @@ def collect_availability(
         raise HTTPException(status_code=409, detail="YCLIENTS is not connected")
     mappings = db.scalars(
         select(YclientsStaffMapping)
+        .join(User, User.id == YclientsStaffMapping.user_id)
         .where(YclientsStaffMapping.salon_id == integration.salon_id)
+        .where(User.is_active.is_(True))
         .order_by(YclientsStaffMapping.staff_name)
     ).all()
     if staff_id is not None:
@@ -556,6 +624,15 @@ def future_content_schedule(
     return max(requested_utc, earliest)
 
 
+def mobile_publication_schedule(requested_at: datetime, settings) -> datetime:
+    if requested_at.tzinfo is None:
+        requested_at = requested_at.replace(tzinfo=timezone(timedelta(hours=settings.local_utc_offset_hours)))
+    requested_utc = requested_at.astimezone(UTC)
+    if requested_utc <= datetime.now(UTC):
+        raise HTTPException(status_code=400, detail="Выберите дату и время в будущем")
+    return requested_utc
+
+
 @router.get("/availability", response_model=AvailabilityResponse)
 def list_availability(
     week_start: Annotated[date, Query()],
@@ -569,6 +646,112 @@ def list_availability(
         staff=[AvailabilityStaffResponse(staff_id=item.staff_id, staff_name=item.staff_name) for item in mappings],
         slots=slots,
     )
+
+
+@router.get("/archive", response_model=ArchivePage)
+def publication_archive(
+    _: Annotated[User, Depends(require_content_access)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> ArchivePage:
+    groups = db.execute(
+        select(ContentItem.id, func.max(func.coalesce(ContentPublication.published_at, ContentPublication.created_at)).label('last_published'))
+        .select_from(ContentPublication)
+        .join(ContentItem, ContentItem.id == ContentPublication.content_item_id)
+        .where(ContentPublication.status == PublicationStatus.PUBLISHED)
+        .group_by(ContentItem.id)
+        .order_by(func.max(func.coalesce(ContentPublication.published_at, ContentPublication.created_at)).desc(), ContentItem.id.desc())
+        .offset(offset).limit(limit + 1)
+    ).all()
+    items = []
+    for item_id, _last_published in groups[:limit]:
+        item = db.get(ContentItem, item_id)
+        publications = db.scalars(select(ContentPublication).where(ContentPublication.content_item_id == item_id, ContentPublication.status == PublicationStatus.PUBLISHED).order_by(func.coalesce(ContentPublication.published_at, ContentPublication.created_at).desc(), ContentPublication.id.desc())).all()
+        publication = publications[0]
+        data = publication_response(publication)
+        preview = next((media_id for media_id in data.media_ids if (media := db.get(MediaFile, media_id)) is not None and media.media_type == MediaType.IMAGE and can_view_archive_media(db, media, _)), None)
+        items.append(ArchiveEntry(publication_id=publication.id, item_id=item.id, title=item.title,
+                                  description=publication.caption or item.caption, platform=publication.platform,
+                                  publication_format=publication.publication_format,
+                                  published_at=publication.published_at or publication.created_at,
+                                  media_ids=data.media_ids, preview_media_id=preview,
+                                  platforms=list(dict.fromkeys(p.platform for p in publications))))
+    return ArchivePage(items=items, next_offset=offset + limit if len(groups) > limit else None)
+
+
+@router.get("/archive/{publication_id}/media/{media_id}")
+def archived_publication_media(publication_id: str, media_id: str,
+                               user: Annotated[User, Depends(require_content_access)],
+                               db: Annotated[Session, Depends(get_db)],
+                               settings: Annotated[Settings, Depends(get_settings)]) -> FileResponse:
+    publication = db.get(ContentPublication, publication_id)
+    if publication is None or publication.status != PublicationStatus.PUBLISHED or media_id not in publication_response(publication).media_ids:
+        raise HTTPException(status_code=404, detail="Материал в архиве не найден")
+    media = db.get(MediaFile, media_id)
+    if media is None or not can_view_archive_media(db, media, user):
+        raise HTTPException(status_code=404, detail="Материал в архиве не найден")
+    try:
+        path = snapshot_file(settings, publication.id, media)
+    except (OSError, ValueError):
+        raise HTTPException(status_code=404, detail="Архивный файл недоступен")
+    return FileResponse(path, media_type=media.mime_type)
+
+
+@router.post("/archive/{publication_id}/reuse", response_model=ContentItemResponse, status_code=status.HTTP_201_CREATED)
+def reuse_archived_publication(
+    publication_id: str,
+    payload: ArchiveReuseRequest,
+    request: Request,
+    auth: Annotated[AuthSession, Depends(require_csrf)],
+    user: Annotated[User, Depends(require_content_access)],
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> ContentItemResponse:
+    source = db.get(ContentPublication, publication_id)
+    if source is None or source.status != PublicationStatus.PUBLISHED:
+        raise HTTPException(status_code=404, detail="Публикация в архиве не найдена")
+    original = get_item(db, source.content_item_id)
+    source_media = publication_response(source).media_ids
+    if len(source_media) > 10:
+        raise HTTPException(status_code=409, detail="В публикации слишком много материалов")
+    media_ids = []
+    for media_id in source_media:
+        media = db.get(MediaFile, media_id)
+        if media is None or not media.publication_allowed or not can_view_archive_media(db, media, user):
+            raise HTTPException(status_code=422, detail="Архивный материал недоступен или запрещён к публикации")
+        if media.deleted_at is None and can_access_workspace(db, media.workspace, user):
+            media_ids.append(media.id)
+            continue
+        if not user.can_upload_media:
+            raise HTTPException(status_code=403, detail="Для восстановления материала нужно право загрузки")
+        destination = db.scalar(select(Workspace).where(Workspace.owner_id == user.id, Workspace.kind == media.workspace.kind, Workspace.deleted_at.is_(None)).order_by(Workspace.created_at).limit(1))
+        if destination is None:
+            raise HTTPException(status_code=409, detail="Создайте доступную папку того же типа для восстановления материала")
+        try:
+            path = snapshot_file(settings, source.id, media)
+            with path.open('rb') as handle:
+                restored = upload_media(request, auth, user, db, settings, UploadFile(file=handle, filename=media.original_name), destination.id, True, None, None)
+        except (OSError, ValueError) as error:
+            raise HTTPException(status_code=409, detail="Не удалось восстановить архивный файл") from error
+        media_ids.append(restored.id)
+    caption = source.caption or original.caption
+    platforms = list(dict.fromkeys(payload.platforms))
+    item = ContentItem(title=original.title, caption=caption, editor_instruction=None,
+                       visual_edit_requested=False, visual_style=original.visual_style,
+                       content_format=ContentFormat.POST, media_limit=max(1, len(media_ids)),
+                       status=ContentStatus.READY, scheduled_at=utc_now(), publication_date_assigned=False,
+                       media_ids_json=json.dumps(media_ids), created_by_id=user.id)
+    db.add(item)
+    db.flush()
+    for platform in platforms:
+        db.add(ContentPublication(content_item_id=item.id, platform=platform, publication_format="post",
+                                  caption=caption, media_ids_json=json.dumps(media_ids)))
+    db.add(AuditLog(actor_id=user.id, action="content.reuse", target_type="content_item", target_id=item.id,
+                    details=json.dumps({"source_publication_id": source.id}, ensure_ascii=False)))
+    db.commit()
+    db.refresh(item)
+    return response_for(db, item)
 
 
 @router.get("/items", response_model=list[ContentItemResponse])
@@ -592,6 +775,7 @@ def list_content_items(
 @router.post("/items", response_model=ContentItemResponse, status_code=status.HTTP_201_CREATED)
 def create_content_item(
     payload: ContentItemCreate,
+    request: Request,
     _: Annotated[AuthSession, Depends(require_csrf)],
     user: Annotated[User, Depends(require_content_access)],
     db: Annotated[Session, Depends(get_db)],
@@ -607,7 +791,8 @@ def create_content_item(
         editor_instruction=payload.editor_instruction.strip() if payload.editor_instruction else None,
         visual_edit_requested=payload.visual_edit_requested,
         visual_style=payload.visual_style,
-        scheduled_at=future_content_schedule(payload.scheduled_at, settings),
+        scheduled_at=(mobile_publication_schedule(payload.scheduled_at, settings) if payload.publication_date_assigned and request.headers.get("authorization", "").lower().startswith("bearer ") else future_content_schedule(payload.scheduled_at, settings)),
+        publication_date_assigned=payload.publication_date_assigned,
         media_ids_json=json.dumps(media_ids),
         content_format=payload.content_format,
         media_limit=payload.media_limit,
@@ -617,7 +802,8 @@ def create_content_item(
     db.add(item)
     db.flush()
     for platform in payload.platforms:
-        db.add(ContentPublication(content_item_id=item.id, platform=platform, publication_format=payload.platform_formats.get(platform, "post")))
+        for publication_format in selected_formats(payload.platform_formats, platform):
+            db.add(ContentPublication(content_item_id=item.id, platform=platform, publication_format=publication_format))
     db.commit()
     db.refresh(item)
     return response_for(db, item)
@@ -649,6 +835,7 @@ def create_content_plan(
             visual_edit_requested=entry.visual_edit_requested,
             visual_style=entry.visual_style,
             scheduled_at=scheduled_at,
+            publication_date_assigned=entry.publication_date_assigned,
             media_ids_json="[]",
             content_format=entry.content_format,
             media_limit=entry.media_limit,
@@ -658,7 +845,8 @@ def create_content_plan(
         db.add(item)
         db.flush()
         for platform in entry.platforms:
-            db.add(ContentPublication(content_item_id=item.id, platform=platform, publication_format=entry.platform_formats.get(platform, "post")))
+            for publication_format in selected_formats(entry.platform_formats, platform):
+                db.add(ContentPublication(content_item_id=item.id, platform=platform, publication_format=publication_format))
         items.append(item)
     db.commit()
     for item in items:
@@ -670,12 +858,27 @@ def create_content_plan(
 def update_content_item(
     item_id: str,
     payload: ContentItemUpdate,
+    request: Request,
     _: Annotated[AuthSession, Depends(require_csrf)],
     user: Annotated[User, Depends(require_content_access)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ContentItemResponse:
     item = get_item(db, item_id)
     changes = payload.model_dump(exclude_unset=True)
+    if changes:
+        db.execute(update(ContentItem).where(ContentItem.id == item.id).values(updated_at=utc_now()))
+        db.refresh(item)
+    if changes and db.scalar(select(ContentPublication.id).where(ContentPublication.content_item_id == item.id, ContentPublication.status == PublicationStatus.PUBLISHING).limit(1)):
+        raise HTTPException(status_code=409, detail="Публикация уже отправляется; дождитесь результата")
+    date_flag = changes.pop("publication_date_assigned", None)
+    if "scheduled_at" in changes and changes["scheduled_at"] is None:
+        raise HTTPException(status_code=400, detail="Укажите дату или снимите её назначение")
+    if "scheduled_at" in changes or (date_flag is not None and date_flag != item.publication_date_assigned):
+        published = db.scalar(select(ContentPublication.id).where(ContentPublication.content_item_id == item.id, ContentPublication.status == PublicationStatus.PUBLISHED).limit(1))
+        if published:
+            raise HTTPException(status_code=409, detail="Дату опубликованного материала изменить нельзя")
+    if date_flag is not None:
+        item.publication_date_assigned = date_flag
     append_instruction = bool(changes.pop("append_editor_instruction", False))
     effective_format = changes.get("content_format", item.content_format)
     effective_limit = changes.get("media_limit", item.media_limit)
@@ -699,7 +902,7 @@ def update_content_item(
     if "visual_style" in changes:
         item.visual_style = changes["visual_style"]
     if "scheduled_at" in changes:
-        item.scheduled_at = future_content_schedule(changes["scheduled_at"], get_settings())
+        item.scheduled_at = (mobile_publication_schedule(changes["scheduled_at"], get_settings()) if request.headers.get("authorization", "").lower().startswith("bearer ") else future_content_schedule(changes["scheduled_at"], get_settings()))
     if "media_ids" in changes:
         item.media_ids_json = json.dumps(changes["media_ids"])
     if "content_format" in changes:
@@ -732,12 +935,69 @@ def update_content_item(
         db.flush()
         platform_formats = changes.get("platform_formats") or {}
         for platform in changes["platforms"]:
-            db.add(ContentPublication(
-                content_item_id=item.id,
-                platform=platform,
-                publication_format=platform_formats.get(platform, "post"),
-            ))
+            for publication_format in selected_formats(platform_formats, platform):
+                db.add(ContentPublication(
+                    content_item_id=item.id,
+                    platform=platform,
+                    publication_format=publication_format,
+                ))
     db.commit()
+    db.refresh(item)
+    return response_for(db, item)
+
+
+@router.post("/plan/start")
+def start_content_plan(
+    payload: ContentPlanStart,
+    auth_session: Annotated[AuthSession, Depends(require_csrf)],
+    user: Annotated[User, Depends(require_content_access)],
+    db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    """Prepare and schedule selected future plan entries; never publish immediately."""
+    from vita29.content.scheduled_delivery import approve
+    results = []
+    for item_id in dict.fromkeys(payload.item_ids):
+        try:
+            item = get_item(db, item_id)
+            if not item.publication_date_assigned:
+                raise ValueError("Назначьте дату и время")
+            if item.status == ContentStatus.SCHEDULED:
+                results.append({"id": item_id, "scheduled": True, "already_scheduled": True})
+                continue
+            if item.status in {ContentStatus.DRAFT, ContentStatus.REVIEW, ContentStatus.APPROVED}:
+                prepare_content_item(item_id, auth_session, user, db)
+                item = get_item(db, item_id)
+            elif item.status != ContentStatus.READY:
+                raise ValueError("Проверьте состояние публикации перед запуском")
+            approve(db, item, user)
+            results.append({"id": item_id, "scheduled": True})
+        except HTTPException as error:
+            db.rollback()
+            results.append({"id": item_id, "scheduled": False, "error": str(error.detail)[:300]})
+        except ValueError as error:
+            db.rollback()
+            results.append({"id": item_id, "scheduled": False, "error": str(error)[:300]})
+        except Exception as error:
+            db.rollback()
+            results.append({"id": item_id, "scheduled": False, "error": f"Не удалось подготовить и запланировать материал ({type(error).__name__})"})
+    return {"results": results}
+
+
+@router.post("/items/{item_id}/schedule", response_model=ContentItemResponse)
+def schedule_content_item(
+    item_id: str,
+    _: Annotated[AuthSession, Depends(require_csrf)],
+    user: Annotated[User, Depends(require_content_access)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ContentItemResponse:
+    from vita29.content.scheduled_delivery import approve
+
+    item = get_item(db, item_id)
+    try:
+        approve(db, item, user)
+    except ValueError as error:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(error)) from error
     db.refresh(item)
     return response_for(db, item)
 
@@ -785,6 +1045,9 @@ def prepare_content_item(
 ) -> ContentItemResponse:
     """Prepare a content draft for every selected platform; never publish it."""
     item = get_item(db, item_id)
+    # Serialize with the scheduling worker before checking publication state.
+    db.execute(update(ContentItem).where(ContentItem.id == item.id).values(updated_at=utc_now()))
+    db.refresh(item)
     if item.status not in {ContentStatus.DRAFT, ContentStatus.REVIEW, ContentStatus.APPROVED, ContentStatus.FAILED, ContentStatus.READY}:
         raise HTTPException(status_code=409, detail="This item cannot be prepared now")
     publications = db.scalars(
@@ -792,6 +1055,10 @@ def prepare_content_item(
     ).all()
     if not publications:
         raise HTTPException(status_code=409, detail="Не выбрана ни одна площадка")
+    if any(publication.status in {PublicationStatus.PUBLISHED, PublicationStatus.PUBLISHING} for publication in publications):
+        raise HTTPException(status_code=409, detail="Нельзя перегенерировать материал, который уже отправлен или отправляется. Создайте новую публикацию из архива.")
+    if any((job := db.get(ScheduledPublicationJob, publication.id)) is not None and job.state in {"sending", "unknown"} for publication in publications):
+        raise HTTPException(status_code=409, detail="Сначала проверьте результат предыдущей отправки на площадке.")
     explicit_source_media: list[MediaFile] = []
     if item.content_format != ContentFormat.AVAILABILITY:
         try:
@@ -806,6 +1073,25 @@ def prepare_content_item(
                 explicit_source_media = db.scalars(
                     select(MediaFile).where(MediaFile.id.in_(selected_ids))
                 ).all()
+                by_id = {media.id: media for media in explicit_source_media}
+                explicit_source_media = [by_id[media_id] for media_id in selected_ids]
+    reels = [p for p in publications if p.platform == PublicationPlatform.INSTAGRAM and p.publication_format == "reel"]
+    is_instagram_reel = bool(reels)
+    for reel in reels:
+        if reel.media_override_ids_json is not None:
+            override_ids = json.loads(reel.media_override_ids_json)
+            validate_content_media_selection(db, user, override_ids, 1)
+            reel_media = db.get(MediaFile, override_ids[0]) if len(override_ids) == 1 else None
+            if reel_media is None or reel_media.media_type != MediaType.VIDEO:
+                raise HTTPException(status_code=422, detail="Для Reels выберите одно готовое видео.")
+        elif item.visual_edit_requested or len(explicit_source_media) != 1 or explicit_source_media[0].media_type != MediaType.VIDEO:
+            raise HTTPException(status_code=422, detail="Для Reels выберите одно готовое видео. Генерация видео пока не поддерживается.")
+    for publication in publications:
+        if publication.media_override_ids_json is not None:
+            validate_content_media_selection(db, user, json.loads(publication.media_override_ids_json), 10)
+    is_story_series = any(p.platform in {PublicationPlatform.INSTAGRAM, PublicationPlatform.TELEGRAM, PublicationPlatform.MAX} and p.publication_format == "story" for p in publications) and len(explicit_source_media) > 1
+    if is_story_series and item.visual_edit_requested:
+        raise HTTPException(status_code=422, detail="Для серии сторис сначала обработайте фотографии по отдельности, затем выберите готовые файлы.")
     if item.content_format == ContentFormat.AVAILABILITY:
         settings = get_settings()
         integration = db.scalar(select(YclientsIntegration).where(YclientsIntegration.status == "active"))
@@ -906,30 +1192,19 @@ def prepare_content_item(
         # page, where an old cached bundle (and a Cyrillic regex boundary)
         # could skip the visual endpoint and leave an unrelated archive photo.
         # Keep this server-side so every platform has the same prepared asset.
-        # Manual selections are always honoured, but an automatic content
-        # selection is equally valuable for a request such as «сделай коллаж
-        # губ из галереи».  Feed the selected source files into the visual
-        # builder instead of losing them and producing an unrelated stock-like
-        # banner.
         prepared_source_media = explicit_source_media
         if not prepared_source_media and draft.media_ids:
             selected_by_id = {
                 media.id: media
-                for media in db.scalars(
-                    select(MediaFile).where(MediaFile.id.in_(draft.media_ids))
-                ).all()
+                for media in db.scalars(select(MediaFile).where(MediaFile.id.in_(draft.media_ids))).all()
             }
-            prepared_source_media = [
-                selected_by_id[media_id]
-                for media_id in draft.media_ids
-                if media_id in selected_by_id
-            ]
+            prepared_source_media = [selected_by_id[media_id] for media_id in draft.media_ids if media_id in selected_by_id]
         if item.visual_edit_requested and not any(media.media_type == MediaType.IMAGE for media in explicit_source_media):
             raise HTTPException(
                 status_code=422,
                 detail="Для обработки ИИ выберите хотя бы одно фото из хранилища. Видео можно добавить в пост отдельно.",
             )
-        if item.visual_edit_requested or requires_generated_visual(item.title, item.editor_instruction):
+        if not (is_instagram_reel or is_story_series) and (item.visual_edit_requested or requires_generated_visual(item.title, item.editor_instruction)):
             try:
                 generated = generate_branded_visual(
                     db,
@@ -952,8 +1227,10 @@ def prepare_content_item(
                 publication.media_ids_json = json.dumps([generated.id])
         else:
             for publication in publications:
-                publication.media_ids_json = json.dumps(draft.media_ids)
+                publication.media_ids_json = json.dumps([media.id for media in explicit_source_media] if is_instagram_reel or is_story_series else draft.media_ids)
     for publication in publications:
+        if publication.media_override_ids_json is not None:
+            publication.media_ids_json = publication.media_override_ids_json
         publication.status = PublicationStatus.PENDING
         publication.error = None
     item.status = ContentStatus.READY
@@ -1015,7 +1292,8 @@ def generate_content_visual(
         raise HTTPException(status_code=502, detail=str(error)) from error
 
     for publication in publications:
-        publication.media_ids_json = json.dumps([generated.id])
+        if publication.media_override_ids_json is None:
+            publication.media_ids_json = json.dumps([generated.id])
         publication.error = None
         if publication.status == PublicationStatus.FAILED:
             publication.status = PublicationStatus.PENDING
@@ -1034,6 +1312,51 @@ def generate_content_visual(
     return response_for(db, item)
 
 
+class PublicationMediaUpdate(BaseModel):
+    media_ids: list[str] = Field(min_length=1, max_length=10)
+
+
+@router.patch("/items/{item_id}/publications/{platform}/media", response_model=ContentItemResponse)
+def update_publication_media(
+    item_id: str,
+    platform: PublicationPlatform,
+    payload: PublicationMediaUpdate,
+    _: Annotated[AuthSession, Depends(require_csrf)],
+    user: Annotated[User, Depends(require_content_access)],
+    db: Annotated[Session, Depends(get_db)],
+    publication_id: str | None = None,
+) -> ContentItemResponse:
+    item = get_item(db, item_id)
+    db.execute(update(ContentItem).where(ContentItem.id == item.id).values(updated_at=utc_now()))
+    db.refresh(item)
+    publication = get_publication(db, item, platform, publication_id)
+    if item.status in {ContentStatus.SCHEDULED, ContentStatus.GENERATING} or publication.status in {PublicationStatus.PUBLISHED, PublicationStatus.PUBLISHING, PublicationStatus.SCHEDULED}:
+        raise HTTPException(status_code=409, detail="Верните публикацию в черновик перед изменением материалов")
+    if db.scalar(select(ContentPublication.id).where(ContentPublication.content_item_id == item.id,
+                  ContentPublication.status.in_([PublicationStatus.PUBLISHING, PublicationStatus.SCHEDULED])).limit(1)):
+        raise HTTPException(status_code=409, detail="Дождитесь завершения отправки или отмените расписание")
+    job = db.get(ScheduledPublicationJob, publication.id)
+    if job and job.state in {"sending", "unknown"}:
+        raise HTTPException(status_code=409, detail="Проверьте результат предыдущей отправки")
+    ids = validate_content_media_selection(db, user, payload.media_ids, 10)
+    files = {m.id: m for m in db.scalars(select(MediaFile).where(MediaFile.id.in_(ids))).all()}
+    if platform == PublicationPlatform.INSTAGRAM:
+        if any(files[i].workspace.kind != WorkspaceKind.STUDIO for i in ids):
+            raise HTTPException(status_code=422, detail="Для Instagram нужны материалы из общей папки")
+        if publication.publication_format == "reel" and (len(ids) != 1 or files[ids[0]].media_type != MediaType.VIDEO):
+            raise HTTPException(status_code=422, detail="Для Reels выберите одно видео")
+    publication.media_override_ids_json = json.dumps(ids)
+    publication.media_ids_json = json.dumps(ids)
+    publication.error = None
+    if publication.status == PublicationStatus.FAILED:
+        publication.status = PublicationStatus.PENDING
+    db.add(AuditLog(actor_id=user.id, action="content.publication.media.update", target_type="content_item", target_id=item.id,
+                    details=json.dumps({"publication_id": publication.id, "count": len(ids)})))
+    db.commit()
+    db.refresh(item)
+    return response_for(db, item)
+
+
 @router.patch("/items/{item_id}/publications/{platform}/caption", response_model=ContentItemResponse)
 def update_publication_caption(
     item_id: str,
@@ -1042,12 +1365,15 @@ def update_publication_caption(
     _: Annotated[AuthSession, Depends(require_csrf)],
     user: Annotated[User, Depends(require_content_access)],
     db: Annotated[Session, Depends(get_db)],
+    publication_id: str | None = None,
 ) -> ContentItemResponse:
     item = get_item(db, item_id)
-    publication = get_publication(db, item, platform)
-    if publication.status == PublicationStatus.PUBLISHED:
-        raise HTTPException(status_code=409, detail="Опубликированный текст нельзя изменить")
-    publication.caption = payload.caption.strip()
+    db.execute(update(ContentItem).where(ContentItem.id == item.id).values(updated_at=utc_now()))
+    db.refresh(item)
+    publication = get_publication(db, item, platform, publication_id)
+    if publication.status in {PublicationStatus.PUBLISHED, PublicationStatus.PUBLISHING}:
+        raise HTTPException(status_code=409, detail="Текст отправленной или отправляемой публикации нельзя изменить")
+    publication.caption = payload.caption.strip() if payload.caption and payload.caption.strip() else None
     db.add(AuditLog(
         actor_id=user.id,
         action="content.caption.update",
@@ -1060,16 +1386,132 @@ def update_publication_caption(
     return response_for(db, item)
 
 
-@router.post("/items/{item_id}/publications/telegram", response_model=ContentItemResponse)
-def publish_telegram_content_item(
+@router.post("/items/{item_id}/publications/{platform}/publish-now", response_model=ContentItemResponse)
+def publish_platform_now(
+    item_id: str,
+    platform: PublicationPlatform,
+    _: Annotated[AuthSession, Depends(require_csrf)],
+    user: Annotated[User, Depends(require_content_access)],
+    db: Annotated[Session, Depends(get_db)],
+    publication_id: str | None = None,
+) -> ContentItemResponse:
+    from vita29.content.scheduled_delivery import publish_now
+    item = get_item(db, item_id)
+    publication = get_publication(db, item, platform, publication_id)
+    try:
+        publish_now(db, item, publication, user)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except RuntimeError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+    db.refresh(item)
+    return response_for(db, item)
+
+
+@router.post("/items/{item_id}/publish-selected")
+def publish_selected_platforms(
     item_id: str,
     _: Annotated[AuthSession, Depends(require_csrf)],
     user: Annotated[User, Depends(require_content_access)],
     db: Annotated[Session, Depends(get_db)],
+) -> dict:
+    from vita29.content.scheduled_delivery import publish_now
+    item = get_item(db, item_id)
+    if item.publication_date_assigned:
+        raise HTTPException(status_code=409, detail="Уберите назначенную дату, чтобы разместить сейчас")
+    publications = db.scalars(select(ContentPublication).where(ContentPublication.content_item_id == item.id).order_by(ContentPublication.created_at, ContentPublication.id)).all()
+    candidates = [p for p in publications if p.status != PublicationStatus.PUBLISHED]
+    if not candidates:
+        raise HTTPException(status_code=409, detail="Все выбранные площадки уже опубликованы")
+    results = []
+    for publication in candidates:
+        platform = publication.platform.value
+        try:
+            publish_now(db, item, publication, user)
+            results.append({"platform": platform, "published": True})
+        except (ValueError, RuntimeError) as error:
+            results.append({"platform": platform, "published": False, "error": str(error)})
+        db.expire_all()
+        item = get_item(db, item_id)
+    return {"item": response_for(db, item), "results": results}
+
+
+@router.delete("/items/{item_id}/publications/{platform}", response_model=ContentItemResponse)
+def remove_unwanted_platform(
+    item_id: str,
+    platform: PublicationPlatform,
+    _: Annotated[AuthSession, Depends(require_csrf)],
+    user: Annotated[User, Depends(require_content_access)],
+    db: Annotated[Session, Depends(get_db)],
+    publication_id: str | None = None,
+) -> ContentItemResponse:
+    item = get_item(db, item_id)
+    publication = get_publication(db, item, platform, publication_id)
+    job = db.get(ScheduledPublicationJob, publication.id)
+    if publication.status not in {PublicationStatus.PENDING, PublicationStatus.FAILED} or (job and job.state != "failed") or publication.external_id:
+        raise HTTPException(status_code=409, detail="Нельзя удалить отправленную или запланированную площадку")
+    count = db.scalar(select(func.count(ContentPublication.id)).where(ContentPublication.content_item_id == item.id)) or 0
+    if count <= 1:
+        raise HTTPException(status_code=409, detail="Должна остаться хотя бы одна площадка")
+    if job:
+        db.delete(job)
+        db.flush()
+    removed = db.execute(delete(ContentPublication).where(ContentPublication.id == publication.id, ContentPublication.status.in_([PublicationStatus.PENDING, PublicationStatus.FAILED])))
+    if removed.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Состояние публикации изменилось")
+    db.add(AuditLog(actor_id=user.id, action="content.platform.remove", target_type="content_item", target_id=item.id, details=json.dumps({"platform": platform.value}, ensure_ascii=False)))
+    db.commit()
+    db.refresh(item)
+    return response_for(db, item)
+
+
+@router.post("/items/{item_id}/publications/{platform}/confirm-not-published", response_model=ContentItemResponse)
+def confirm_publication_not_published(
+    item_id: str,
+    platform: PublicationPlatform,
+    _: Annotated[AuthSession, Depends(require_csrf)],
+    user: Annotated[User, Depends(require_content_access)],
+    db: Annotated[Session, Depends(get_db)],
+    publication_id: str | None = None,
+) -> ContentItemResponse:
+    item = get_item(db, item_id)
+    publication = get_publication(db, item, platform, publication_id)
+    job = db.get(ScheduledPublicationJob, publication.id)
+    if publication.status != PublicationStatus.FAILED or job is None or job.state != "unknown":
+        raise HTTPException(status_code=409, detail="Подтверждение не требуется или статус уже изменился")
+    if publication.external_id:
+        raise HTTPException(status_code=409, detail="Часть материала уже подтверждена. Проверьте площадку и создайте отдельную публикацию для оставшихся файлов.")
+    claim = db.execute(update(ScheduledPublicationJob).where(ScheduledPublicationJob.publication_id == publication.id, ScheduledPublicationJob.state == "unknown").values(state="failed", updated_at=utc_now()))
+    if claim.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Статус уже изменился")
+    publication.error = None
+    other_scheduled = db.scalar(select(ContentPublication.id).where(ContentPublication.content_item_id == item.id, ContentPublication.id != publication.id, ContentPublication.status == PublicationStatus.SCHEDULED).limit(1))
+    item.status = ContentStatus.SCHEDULED if other_scheduled else ContentStatus.READY
+    db.add(AuditLog(actor_id=user.id, action="content.delivery.confirm_not_published", target_type="content_item", target_id=item.id, details=json.dumps({"platform": platform.value}, ensure_ascii=False)))
+    db.commit()
+    db.refresh(item)
+    return response_for(db, item)
+
+
+@router.post("/items/{item_id}/publications/telegram", response_model=ContentItemResponse)
+def publish_telegram_content_item(
+    item_id: str,
+    request: Request,
+    _: Annotated[AuthSession, Depends(require_csrf)],
+    user: Annotated[User, Depends(require_content_access)],
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> ContentItemResponse:
     """Send the already prepared Telegram draft only after an explicit UI action."""
     item = get_item(db, item_id)
     publication = get_publication(db, item, PublicationPlatform.TELEGRAM)
+    mobile = request.headers.get("authorization", "").lower().startswith("bearer ")
+    if mobile and item.publication_date_assigned:
+        raise HTTPException(status_code=409, detail="Уберите дату публикации, чтобы опубликовать сейчас")
+    if publication.status in {PublicationStatus.PUBLISHED, PublicationStatus.PUBLISHING}:
+        raise HTTPException(status_code=409, detail="Публикация уже отправлена или отправляется")
     if publication.publication_format == "reel":
         raise HTTPException(status_code=409, detail="Публикация видеоролика пока не поддерживается. Используйте пост или отправьте видео вручную.")
     if item.content_format == ContentFormat.STORY or publication.publication_format == "story":
@@ -1077,37 +1519,54 @@ def publish_telegram_content_item(
             status_code=409,
             detail="История подготовлена как вертикальный макет. Telegram Bot API не публикует истории канала.",
         )
-    if item.status not in {ContentStatus.READY, ContentStatus.SCHEDULED}:
+    if item.status not in {ContentStatus.READY, ContentStatus.SCHEDULED} and not (mobile and item.status in {ContentStatus.DRAFT, ContentStatus.REVIEW, ContentStatus.APPROVED, ContentStatus.FAILED}):
         raise HTTPException(status_code=409, detail="Prepare the draft before publishing")
+    if mobile and not publication.caption and item.caption:
+        publication.caption = item.caption
     if not publication.caption:
         raise HTTPException(status_code=409, detail="Telegram draft is empty")
     try:
         media_ids = json.loads(publication.media_ids_json)
     except (TypeError, json.JSONDecodeError):
         media_ids = []
+    if mobile and not media_ids and item.status not in {ContentStatus.READY, ContentStatus.SCHEDULED}:
+        try:
+            media_ids = json.loads(item.media_ids_json)
+        except (TypeError, json.JSONDecodeError):
+            media_ids = []
+        if isinstance(media_ids, list):
+            publication.media_ids_json = json.dumps(media_ids)
     if not isinstance(media_ids, list) or not all(isinstance(value, str) for value in media_ids):
         raise HTTPException(status_code=409, detail="Telegram draft contains invalid files")
     media_files: list[MediaFile] = []
     if media_ids:
-        media_files = db.scalars(
+        media_query = (
             select(MediaFile)
             .join(Workspace, MediaFile.workspace_id == Workspace.id)
             .where(
                 MediaFile.id.in_(media_ids),
                 MediaFile.deleted_at.is_(None),
                 MediaFile.publication_allowed.is_(True),
-                Workspace.kind == WorkspaceKind.STUDIO,
             )
-        ).all()
+        )
+        if not mobile:
+            media_query = media_query.where(Workspace.kind == WorkspaceKind.STUDIO)
+        media_files = db.scalars(media_query).all()
         by_id = {media.id: media for media in media_files}
-        if len(by_id) != len(media_ids):
+        if len(by_id) != len(media_ids) or (mobile and any(not can_access_workspace(db, media.workspace, user) for media in media_files)):
             raise HTTPException(
                 status_code=409,
                 detail="One of the selected files is no longer available for publication",
             )
         media_files = [by_id[media_id] for media_id in media_ids]
-    publication.status = PublicationStatus.PUBLISHING
-    publication.error = None
+    try:
+        snapshot_publication(settings, publication.id, media_files)
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=409, detail="Не удалось сохранить материалы в архиве; публикация не отправлена") from error
+    claimed = db.execute(update(ContentPublication).where(ContentPublication.id == publication.id, ContentPublication.status.in_([PublicationStatus.PENDING, PublicationStatus.SCHEDULED, PublicationStatus.FAILED])).values(status=PublicationStatus.PUBLISHING, error=None))
+    if claimed.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Публикация уже отправлена или отправляется")
     db.commit()
     try:
         external_id = publish_to_channel(get_settings(), publication.caption, media_files)
@@ -1139,13 +1598,21 @@ def publish_telegram_content_item(
 @router.post("/items/{item_id}/publications/instagram", response_model=ContentItemResponse)
 def publish_instagram_content_item(
     item_id: str,
+    request: Request,
     _: Annotated[AuthSession, Depends(require_csrf)],
     user: Annotated[User, Depends(require_content_access)],
     db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> ContentItemResponse:
     """Publish an approved Instagram item using revocable public delivery URLs."""
     item = get_item(db, item_id)
+    if request.headers.get("authorization", "").lower().startswith("bearer ") and item.publication_date_assigned:
+        raise HTTPException(status_code=409, detail="Уберите дату публикации, чтобы опубликовать сейчас")
     publication = get_publication(db, item, PublicationPlatform.INSTAGRAM)
+    if publication.publication_format == "story" and publication.status == PublicationStatus.FAILED and publication.external_id:
+        raise HTTPException(status_code=409, detail="Часть сторис уже опубликована. Проверьте Instagram перед повторной отправкой.")
+    if publication.status in {PublicationStatus.PUBLISHED, PublicationStatus.PUBLISHING}:
+        raise HTTPException(status_code=409, detail="Публикация уже отправлена или отправляется")
     if item.status not in {ContentStatus.READY, ContentStatus.SCHEDULED}:
         raise HTTPException(status_code=409, detail="Сначала подготовьте материал")
     if not publication.caption:
@@ -1170,8 +1637,14 @@ def publish_instagram_content_item(
     if len(by_id) != len(media_ids):
         raise HTTPException(status_code=409, detail="Один из материалов больше недоступен для публикации")
     media_files = [by_id[media_id] for media_id in media_ids]
-    publication.status = PublicationStatus.PUBLISHING
-    publication.error = None
+    try:
+        snapshot_publication(settings, publication.id, media_files)
+    except (OSError, ValueError) as error:
+        raise HTTPException(status_code=409, detail="Не удалось сохранить материалы в архиве; публикация не отправлена") from error
+    claimed = db.execute(update(ContentPublication).where(ContentPublication.id == publication.id, ContentPublication.status.in_([PublicationStatus.PENDING, PublicationStatus.SCHEDULED, PublicationStatus.FAILED])).values(status=PublicationStatus.PUBLISHING, error=None))
+    if claimed.rowcount != 1:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Публикация уже отправлена или отправляется")
     db.commit()
     try:
         external_id = publish_to_instagram(
@@ -1208,6 +1681,10 @@ def delete_content_item(
     db: Annotated[Session, Depends(get_db)],
 ) -> None:
     item = get_item(db, item_id)
+    db.execute(update(ContentItem).where(ContentItem.id == item.id).values(updated_at=utc_now()))
+    db.refresh(item)
+    if db.scalar(select(ContentPublication.id).where(ContentPublication.content_item_id == item.id, ContentPublication.status == PublicationStatus.PUBLISHING).limit(1)):
+        raise HTTPException(status_code=409, detail="Публикация уже отправляется; дождитесь результата")
     published = db.scalar(
         select(ContentPublication.id).where(
             ContentPublication.content_item_id == item.id,

@@ -703,7 +703,7 @@ def _draw_light_editorial_copy(
     copy_hint: str | None = None,
 ) -> None:
     """Typeset a restrained light editorial block for the ivory brand family."""
-    copy, exact = _campaign_copy(title, instruction, copy_hint)
+    copy, _ = _campaign_copy(title, instruction, copy_hint)
     if not copy:
         return
     # The copy is intentionally laid out by the application: Russian remains
@@ -875,6 +875,45 @@ def _requires_true_photo_edit(instruction: str) -> bool:
     ))
 
 
+def _native_visual_prompt(title: str, instruction: str, *, has_source: bool, force_edit: bool, style: str, copy_hint: str | None = None, source_count: int = 0) -> str:
+    """Give the image model the actual brief and let it art-direct typography.
+
+    An explicit photo edit does not silently become a poster or change a
+    client's procedure result. The model output always remains reviewable;
+    exact spelling, source identity and edits still need human verification.
+    """
+    editor_note = (instruction or '').strip()[:3000]
+    topic = (title or '').strip()[:300]
+    if has_source and force_edit:
+        return (
+            'Edit the supplied photograph according to the user request. Preserve the same person, '
+            'identity, anatomy, procedure result, camera framing, lighting, and all details outside the requested edits. '
+            'Change only the explicitly requested objects, colours, retouching, text or layout; do not introduce '
+            'a different face, new treatment, frame, logo, caption, or banner unless specifically requested. '
+            'For colour changes keep texture, shadows and object shape natural. Keep the original photo recognisable. '
+            f'User title: {topic}\nExact editor request: {editor_note}'
+        )
+    family = ('warm ivory, champagne and subtle taupe, clean premium editorial design' if style == 'light'
+              else 'near-black and espresso with restrained champagne-gold, refined premium editorial design')
+    copy, exact = _campaign_copy(title, instruction, copy_hint)
+    source_rule = ('Use supplied source images faithfully; preserve recognisable people and actual treatment results. '
+                   'Do not invent before/after results. ' if has_source else '')
+    if source_count > 1:
+        source_rule += 'Compose the provided photographs into an elegant coherent collage; each selected photograph must remain identifiable and not be substituted with an invented result. '
+    typography = (f'Render this supplied Russian copy correctly and legibly, preserving wording and numbers: «{copy}». '
+                  if copy else 'Use minimal copy and do not invent prices, discounts or dates. ')
+    return (
+        'Create a finished, polished, art-directed vertical social media creative for the Russian beauty studio VIOLETTA. '
+        f'Visual style: {family}. The image model should create the full composition and elegant legible Cyrillic typography, '
+        'not an empty template. Compose text and imagery together with clear hierarchy, generous margins and no clipping. '
+        'Use tasteful serif and clean supporting type appropriate to the design. Avoid clutter and generic decorative lettering. '
+        'Use VIOLETTA as a restrained wordmark; do not invent a detailed logo or inaccurate prices. '
+        f'{source_rule}{typography}'
+        f'Topic: {topic}\nEditor instructions: {editor_note}\n'
+        'Respect the editor instructions while preserving all stated facts. Do not add unrequested claims or prices.'
+    )
+
+
 def _save_generated_image(
     db: Session, settings: Settings, item: ContentItem, actor_id: str, instruction: str, image: bytes
 ) -> MediaFile:
@@ -911,10 +950,13 @@ def generate_branded_visual(
     """Generate or carefully edit one visual and save it in the shared output folder."""
     selected_style = getattr(item, "visual_style", "auto")
     image_sources = [entry for entry in source_media if entry.media_type == MediaType.IMAGE][:16]
+    native_visuals = config_value(settings, 'openai_native_visuals', 'true').casefold() != 'false'
+    collage_requested = _wants_collage(item.title, instruction)
+    before_after = bool(re.search(r'до\s*(?:и|/|—|-)\s*после', f'{item.title}\n{instruction}'.casefold()))
     # The order selected in the archive is meaningful: for two photos it is
     # "before" then "after". Render this locally so the client result is never
     # invented or mixed by an image model.
-    if len(image_sources) >= 2 and (not force_edit or not _requires_true_photo_edit(instruction)):
+    if len(image_sources) >= 2 and not force_edit and (before_after or not (native_visuals and collage_requested)):
         return _save_generated_image(
             db, settings, item, actor_id, instruction,
             _before_after_collage(
@@ -925,20 +967,22 @@ def generate_branded_visual(
     image_model = config_value(settings, "openai_image_model", settings.openai_image_model)
     # The short topic is passed alongside an optional editor note, so image
     # generation cannot accidentally illustrate a different treatment.
-    collage_requested = _wants_collage(item.title, instruction)
     # Several selected source photos are intentionally treated as a collage as
     # well: the content agent made that selection specifically for one merged
     # publication visual. A single selected photo remains a normal edit.
-    prompt = _visual_prompt(
-        item.title,
-        instruction,
-        bool(image_sources),
-        collage=collage_requested or len(image_sources) >= 2,
-        requested_style=selected_style,
-    )
+    prompt = (_native_visual_prompt(item.title, instruction, has_source=bool(image_sources), force_edit=force_edit,
+                                   style=_visual_style(item.title, instruction, collage=collage_requested, requested_style=selected_style), copy_hint=copy_hint, source_count=len(image_sources))
+              if native_visuals else _visual_prompt(item.title, instruction, bool(image_sources),
+                  collage=collage_requested or len(image_sources) >= 2, requested_style=selected_style))
+    detailed_model = image_model.startswith(('gpt-image-2.5', 'gpt-image-2.6'))
+    image_options = {'model': image_model, 'prompt': prompt, 'size': '1024x1536',
+                     'quality': 'xhigh' if native_visuals and detailed_model else 'high',
+                     'output_format': 'jpeg', 'background': 'opaque'}
+    if image_model.startswith('gpt-image-2.6'):
+        image_options['complexity'] = 'low' if image_sources and force_edit else 'high'
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
-        with openai_ipv4_client(settings.openai_http_timeout_seconds) as client:
+        with openai_ipv4_client(max(settings.openai_http_timeout_seconds, 180.0)) as client:
             if image_sources:
                 files: list[tuple[str, tuple[str, bytes, str]]] = []
                 for entry in image_sources:
@@ -946,16 +990,16 @@ def generate_branded_visual(
                     with Image.open(path) as source:
                         normalized = io.BytesIO()
                         ImageOps.exif_transpose(source).convert("RGB").save(normalized, format="JPEG", quality=94)
-                    files.append(("image", (f"{entry.id}.jpg", normalized.getvalue(), "image/jpeg")))
+                    files.append(("image[]" if len(image_sources) > 1 else "image", (f"{entry.id}.jpg", normalized.getvalue(), "image/jpeg")))
                 response = client.post(
                     "https://api.openai.com/v1/images/edits", headers=headers,
-                    data={"model": image_model, "prompt": prompt, "size": "1024x1536", "quality": "high", "output_format": "jpeg", "background": "opaque"},
+                    data=image_options,
                     files=files,
                 )
             else:
                 response = client.post(
                     "https://api.openai.com/v1/images/generations", headers=headers,
-                    json={"model": image_model, "prompt": prompt, "size": "1024x1536", "quality": "high", "output_format": "jpeg", "background": "opaque"},
+                    json=image_options,
                 )
         ensure_openai_response(response).raise_for_status()
         encoded = response.json()["data"][0]["b64_json"]
@@ -963,7 +1007,13 @@ def generate_branded_visual(
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, OSError) as error:
         raise ContentAgentError("Не удалось сгенерировать изображение. Попробуйте уточнить запрос позже.") from error
 
-    final_image = _overlay_brand_caption(
-        raw_image, item.title, instruction, copy_hint, requested_style=selected_style,
-    )
+    if native_visuals:
+        try:
+            with Image.open(io.BytesIO(raw_image)) as image:
+                image.verify()
+        except (OSError, ValueError) as error:
+            raise ContentAgentError('Модель вернула повреждённое изображение. Повторите попытку.') from error
+        final_image = raw_image
+    else:
+        final_image = _overlay_brand_caption(raw_image, item.title, instruction, copy_hint, requested_style=selected_style)
     return _save_generated_image(db, settings, item, actor_id, instruction, final_image)

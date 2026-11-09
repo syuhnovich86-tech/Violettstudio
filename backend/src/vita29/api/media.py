@@ -1,4 +1,6 @@
+import hashlib
 import json
+import re
 from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Annotated
 
@@ -6,7 +8,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Upl
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from vita29.auth.dependencies import get_current_user, require_csrf
@@ -204,6 +206,7 @@ def list_media(
     date_to: Annotated[date | None, Query()] = None,
     procedure: Annotated[str | None, Query(max_length=160)] = None,
     client: Annotated[str | None, Query(max_length=200)] = None,
+    q: Annotated[str | None, Query(max_length=200)] = None,
     yclients_record_id: Annotated[int | None, Query()] = None,
     calendar_date: Annotated[date | None, Query()] = None,
     capture_year: Annotated[int | None, Query(ge=1900, le=2200)] = None,
@@ -228,6 +231,9 @@ def list_media(
         MediaFile.deleted_at.is_(None),
         MediaFile.workspace_id.in_(accessible_workspace_ids),
     )
+    if q and q.strip():
+        term = q.strip().casefold()
+        query = query.where(or_(func.casefold(MediaFile.original_name).contains(term), func.casefold(func.coalesce(MediaFile.comment, "")).contains(term)))
     effective_date = func.coalesce(MediaFile.captured_at, MediaFile.created_at)
     local_timezone = timezone(timedelta(hours=settings.local_utc_offset_hours))
     visit_joined = False
@@ -454,6 +460,64 @@ def create_media_batch(
     )
 
 
+def _scoped_ios_import_key(request: Request, user: User, workspace: Workspace, settings: Settings) -> str:
+    import_key = request.headers.get("x-ios-import-key", "")
+    if not re.fullmatch(r"[0-9a-f]{64}", import_key):
+        raise HTTPException(status_code=400, detail="Invalid iPhone import key")
+    if (
+        not request.headers.get("authorization", "").lower().startswith("bearer ")
+        or not user.is_active
+        or not user.can_upload_media
+        or user.role not in (UserRole.OWNER, UserRole.ADMIN)
+        or not user.can_import_ios_photo_library
+    ):
+        raise HTTPException(status_code=403, detail="iPhone library import is disabled")
+    if workspace.kind != WorkspaceKind.PRIVATE and not (workspace.kind == WorkspaceKind.STUDIO and workspace.id == "7277b107-5194-4337-b62a-7fb96d053f05"):
+        raise HTTPException(status_code=403, detail="Для синхронизации выберите личную папку или «Телефон студии»")
+    return hashlib.sha256(f"{user.id}:{workspace.id}:{import_key}".encode()).hexdigest()
+
+
+def _scoped_android_import_key(request: Request, user: User, workspace: Workspace, settings: Settings) -> str:
+    import_key = request.headers.get("x-android-import-key", "")
+    if not re.fullmatch(r"[0-9a-f]{64}", import_key):
+        raise HTTPException(status_code=400, detail="Invalid Android import key")
+    if (not request.headers.get("authorization", "").lower().startswith("bearer ")
+        or not user.is_active or not user.can_upload_media
+        or (user.role != UserRole.OWNER and not user.can_import_android_photo_library)):
+        raise HTTPException(status_code=403, detail="Android library import is disabled")
+    if workspace.kind != WorkspaceKind.PRIVATE and not (workspace.kind == WorkspaceKind.STUDIO and workspace.id == "7277b107-5194-4337-b62a-7fb96d053f05"):
+        raise HTTPException(status_code=403, detail="Для синхронизации выберите личную папку или «Телефон студии»")
+    return hashlib.sha256(f"android:{user.id}:{workspace.id}:{import_key}".encode()).hexdigest()
+
+
+@router.get("/android-import/status")
+def android_import_status(request: Request, user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)], settings: Annotated[Settings, Depends(get_settings)], workspace_id: Annotated[str, Query()]) -> dict[str, bool]:
+    workspace = get_accessible_workspace(db, workspace_id, user)
+    key = _scoped_android_import_key(request, user, workspace, settings)
+    return {"exists": db.scalar(select(MediaFile.id).where(MediaFile.ios_import_key == key, MediaFile.deleted_at.is_(None))) is not None}
+
+
+@router.get("/ios-import/status")
+def ios_import_status(
+    request: Request,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+    workspace_id: Annotated[str, Query()],
+    checksum_sha256: Annotated[str | None, Query()] = None,
+) -> dict[str, bool]:
+    workspace = get_accessible_workspace(db, workspace_id, user)
+    key = _scoped_ios_import_key(request, user, workspace, settings)
+    if checksum_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", checksum_sha256):
+        raise HTTPException(status_code=400, detail="Invalid file checksum")
+    previous = db.scalar(select(MediaFile).where(MediaFile.ios_import_key == key, MediaFile.deleted_at.is_(None)))
+    if previous is not None and previous.workspace_id != workspace.id:
+        raise HTTPException(status_code=409, detail="iPhone import destination changed")
+    if previous is None and checksum_sha256:
+        previous = db.scalar(select(MediaFile).where(MediaFile.workspace_id == workspace.id, MediaFile.checksum_sha256 == checksum_sha256, MediaFile.deleted_at.is_(None)).limit(1))
+    return {"exists": previous is not None}
+
+
 @router.post("", response_model=MediaResponse, status_code=status.HTTP_201_CREATED)
 def upload_media(
     request: Request,
@@ -470,6 +534,21 @@ def upload_media(
     if not user.can_upload_media:
         raise HTTPException(status_code=403, detail="Media upload is disabled")
     workspace = get_accessible_workspace(db, workspace_id, user)
+    scoped_import_key = None
+    if request.headers.get("x-ios-import-key") is not None or request.headers.get("x-android-import-key") is not None:
+        if request.headers.get("x-ios-import-key") is not None and request.headers.get("x-android-import-key") is not None:
+            raise HTTPException(status_code=400, detail="Conflicting import keys")
+        scoped_import_key = (_scoped_android_import_key if request.headers.get("x-android-import-key") is not None else _scoped_ios_import_key)(request, user, workspace, settings)
+        if publication_allowed or yclients_record_id is not None or batch_id is not None:
+            raise HTTPException(status_code=400, detail="Invalid iPhone import destination")
+        previous = db.scalar(select(MediaFile).where(MediaFile.ios_import_key == scoped_import_key))
+        if previous is not None:
+            if previous.workspace_id != workspace.id:
+                raise HTTPException(status_code=409, detail="iPhone import destination changed")
+            if previous.deleted_at is None:
+                return media_response(previous, user)
+            previous.ios_import_key = None
+            db.flush()
     if (
         request.headers.get("authorization", "").lower().startswith("bearer ")
         and workspace.display_name == settings.import_workspace_name
@@ -521,6 +600,34 @@ def upload_media(
         str(settings.geonames_cities_path)
     ).resolve(stored.gps_latitude, stored.gps_longitude)
 
+    if scoped_import_key is not None:
+        # Serialize the final checksum check and insert for a destination.  The
+        # original may already have arrived from another phone or regular upload.
+        try:
+            db.commit()
+            if db.get_bind().dialect.name == "sqlite":
+                db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            else:
+                db.scalar(select(Workspace).where(Workspace.id == workspace_id).with_for_update())
+            db.refresh(user)
+            workspace = get_accessible_workspace(db, workspace_id, user)
+            (_scoped_android_import_key if request.headers.get("x-android-import-key") is not None else _scoped_ios_import_key)(request, user, workspace, settings)
+            previous = db.scalar(select(MediaFile).where(
+                MediaFile.workspace_id == workspace_id,
+                MediaFile.checksum_sha256 == stored.checksum_sha256,
+                MediaFile.size_bytes == stored.size_bytes,
+                MediaFile.deleted_at.is_(None),
+            ).limit(1))
+            if previous is not None:
+                original_path(settings, stored.storage_key).unlink(missing_ok=True)
+                response = media_response(previous, user)
+                db.commit()
+                return response
+        except Exception:
+            db.rollback()
+            original_path(settings, stored.storage_key).unlink(missing_ok=True)
+            raise
+
     media = MediaFile(
         owner_id=workspace.owner_id,
         workspace_id=workspace.id,
@@ -531,6 +638,7 @@ def upload_media(
         location_country=location_country,
         location_city=location_city,
         location_key=location_key,
+        ios_import_key=scoped_import_key,
         **stored.__dict__,
     )
     try:
@@ -555,6 +663,14 @@ def upload_media(
             )
         )
         db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        original_path(settings, stored.storage_key).unlink(missing_ok=True)
+        if scoped_import_key is not None:
+            previous = db.scalar(select(MediaFile).where(MediaFile.ios_import_key == scoped_import_key))
+            if previous is not None and previous.workspace_id == workspace.id:
+                return media_response(previous, user)
+        raise HTTPException(status_code=500, detail="Could not save file metadata") from error
     except SQLAlchemyError as error:
         db.rollback()
         original_path(settings, stored.storage_key).unlink(missing_ok=True)

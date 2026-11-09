@@ -34,14 +34,16 @@ def _safe_segment(value: str, label: str) -> str:
     return value
 
 
-def _latest_update(settings: Settings, runtime_version: str) -> Path:
+def _latest_update(settings: Settings, runtime_version: str, platform: str) -> Path | None:
     runtime_dir = settings.mobile_updates_root / _safe_segment(runtime_version, "runtime version")
     if not runtime_dir.is_dir():
-        raise HTTPException(status_code=404, detail="No update for this runtime")
+        return None
     updates = sorted((path for path in runtime_dir.iterdir() if path.is_dir()), key=lambda path: path.name, reverse=True)
-    if not updates:
-        raise HTTPException(status_code=404, detail="No update for this runtime")
-    return updates[0]
+    for update in updates:
+        metadata, _, _ = _read_metadata(update)
+        if platform in metadata.get("fileMetadata", {}):
+            return update
+    return None
 
 
 def _read_metadata(update_dir: Path) -> tuple[dict[str, Any], bytes, Path]:
@@ -69,7 +71,7 @@ def _asset(update_dir: Path, relative_path: str, extension: str | None, *, launc
     key = hashlib.md5(payload).hexdigest()
     ext = "bundle" if launch else (extension or file_path.suffix.lstrip(".") or "bin")
     content_type = "application/javascript" if launch else (mimetypes.guess_type(f"file.{ext}")[0] or "application/octet-stream")
-    public_root = settings.yclients_public_base_url.rstrip("/")
+    public_root = (settings.mobile_android_public_base_url if platform == "android" else settings.yclients_public_base_url).rstrip("/")
     update_name = quote(update_dir.name, safe="")
     asset_path = quote(relative_path, safe="")
     return {
@@ -94,7 +96,9 @@ def manifest(
         raise HTTPException(status_code=400, detail="Unsupported platform")
     if not expo_runtime_version:
         raise HTTPException(status_code=400, detail="Missing runtime version")
-    update_dir = _latest_update(settings, expo_runtime_version)
+    update_dir = _latest_update(settings, expo_runtime_version, expo_platform)
+    if update_dir is None:
+        return Response(status_code=status.HTTP_204_NO_CONTENT, headers=_headers())
     metadata, raw, metadata_path = _read_metadata(update_dir)
     identifier = _update_id(raw)
     if expo_current_update_id == identifier:

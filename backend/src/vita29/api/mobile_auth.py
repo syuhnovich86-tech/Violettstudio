@@ -16,6 +16,7 @@ from vita29.auth.security import (
 )
 from vita29.auth.throttle import clear_login_failures, login_is_allowed, record_login_failure
 from vita29.db.models import AuditLog, AuthSession, User
+from vita29.api.mobile_push import remove_session_tokens
 from vita29.db.session import get_db
 from vita29.settings import Settings, get_settings
 
@@ -63,5 +64,6 @@ def mobile_logout(
     session: Annotated[AuthSession, Depends(require_csrf)],
     db: Annotated[Session, Depends(get_db)],
 ) -> None:
+    remove_session_tokens(db, session.id)
     db.delete(session)
     db.commit()

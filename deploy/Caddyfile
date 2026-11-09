@@ -1,6 +1,8 @@
 (vita29_app) {
     encode zstd gzip
-    header {
+    @main not path /assets/vk-check/*
+    @vkcheck path /assets/vk-check/*
+    header @main {
         Strict-Transport-Security "max-age=31536000"
         X-Content-Type-Options "nosniff"
         X-Frame-Options "DENY"
@@ -8,21 +10,24 @@
         Permissions-Policy "camera=(self), microphone=(self), web-share=(self), geolocation=()"
         Content-Security-Policy "default-src 'self'; img-src 'self' data:; media-src 'self' blob:; style-src 'self'; script-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
     }
+    header @vkcheck {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        Cache-Control "no-store"
+        Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors https://vk.com https://*.vk.com https://vk.ru https://*.vk.ru; form-action 'none'"
+    }
     request_body {
         max_size 2GB
     }
     reverse_proxy app:8000
 }
-
 http:// {
     redir https://31-10-64-46.sslip.io{uri} permanent
 }
-
-# Private loopback origin used only by Tailscale Funnel.
 http://:8080 {
     import vita29_app
 }
-
 31-10-64-46.sslip.io {
     import vita29_app
 }

@@ -1,0 +1,88 @@
+{
+  "expo": {
+    "name": "VIOLETTA",
+    "slug": "violetta-media-center",
+    "scheme": "violetta",
+    "version": "0.2.0",
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://31-10-64-46.sslip.io/api/v1/mobile/updates/manifest",
+      "checkAutomatically": "ON_LOAD",
+      "fallbackToCacheTimeout": 0
+    },
+    "orientation": "portrait",
+    "icon": "./assets/violetta-emblem-circle-v3.png",
+    "userInterfaceStyle": "automatic",
+    "backgroundColor": "#FFFAF6",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "ru.violetta.mediacenter",
+      "buildNumber": "3",
+      "runtimeVersion": "0.3.0",
+      "infoPlist": {
+        "NSPhotoLibraryUsageDescription": "VIOLETTA использует доступ к Фото только по вашему выбору, чтобы копировать материалы в выбранную папку на сервере, включая оригиналы из iCloud.",
+        "NSCameraUsageDescription": "Камера используется для добавления фото и видео в медиатеку VIOLETTA.",
+        "NSMicrophoneUsageDescription": "Микрофон используется при записи видео в приложении VIOLETTA."
+      }
+    },
+    "android": {
+      "package": "ru.violetta.mediacenter",
+      "versionCode": 6,
+      "runtimeVersion": "0.5.0",
+      "googleServicesFile": "./google-services.json",
+      "blockedPermissions": [
+        "android.permission.SYSTEM_ALERT_WINDOW"
+      ],
+      "adaptiveIcon": {
+        "backgroundColor": "#FFFAF6",
+        "foregroundImage": "./assets/violetta-emblem-circle-v3.png"
+      },
+      "predictiveBackGestureEnabled": true
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      "./plugins/withAndroidReleaseSafety",
+      [
+        "expo-secure-store",
+        {
+          "configureAndroidBackup": true
+        }
+      ],
+      "expo-font",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "VIOLETTA использует микрофон для голосового ввода и записи видео только после вашего действия.",
+          "speechRecognitionPermission": "Разрешите VIOLETTA распознавать речь для заполнения названия и уточнений генерации контента.",
+          "androidSpeechServicePackages": [
+            "com.google.android.googlequicksearchbox"
+          ]
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Разрешите VIOLETTA использовать камеру для добавления фото и видео в медиатеку.",
+          "microphonePermission": "Разрешите VIOLETTA использовать микрофон при записи видео."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Разрешите VIOLETTA доступ к Фото для выбора файлов и, если вы включите синхронизацию, копирования медиатеки в выбранную папку, включая iCloud.",
+          "cameraPermission": "Разрешите VIOLETTA использовать камеру для добавления материалов."
+        }
+      ],
+      "expo-sqlite",
+      "expo-notifications",
+      "expo-background-task",
+      "expo-video",
+      "expo-sharing",
+      "expo-updates"
+    ]
+  }
+}

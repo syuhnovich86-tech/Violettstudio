@@ -48,13 +48,16 @@ class UpdatePermissionsRequest(BaseModel):
     role: UserRole
     can_create_shared_workspaces: bool
     can_create_private_workspaces: bool
+    can_delete_workspaces: bool | None = None
     can_add_comments: bool
     can_upload_media: bool
     can_view_all_calendars: bool
     can_access_admin: bool
     can_access_chats: bool
     can_access_content: bool = False
+    can_access_analytics: bool | None = None
     can_import_ios_photo_library: bool = False
+    can_import_android_photo_library: bool | None = None
 
 
 def persist_user(db: Session, user: User) -> None:
@@ -255,29 +258,42 @@ def update_permissions(
         "role": user.role.value,
         "can_create_shared_workspaces": user.can_create_shared_workspaces,
         "can_create_private_workspaces": user.can_create_private_workspaces,
+        "can_delete_workspaces": user.can_delete_workspaces,
         "can_add_comments": user.can_add_comments,
         "can_upload_media": user.can_upload_media,
         "can_view_all_calendars": user.can_view_all_calendars,
         "can_access_admin": user.can_access_admin,
         "can_access_chats": user.can_access_chats,
         "can_access_content": user.can_access_content,
+        "can_access_analytics": user.can_access_analytics,
         "can_import_ios_photo_library": user.can_import_ios_photo_library,
+        "can_import_android_photo_library": user.can_import_android_photo_library,
     }
     user.role = payload.role
     user.can_create_shared_workspaces = payload.can_create_shared_workspaces
     user.can_create_private_workspaces = payload.can_create_private_workspaces
+    if payload.can_delete_workspaces is not None:
+        user.can_delete_workspaces = payload.can_delete_workspaces
     user.can_add_comments = payload.can_add_comments
     user.can_upload_media = payload.can_upload_media
     user.can_view_all_calendars = payload.can_view_all_calendars
     user.can_access_admin = payload.can_access_admin
     user.can_access_chats = payload.can_access_chats
     user.can_access_content = payload.can_access_content
+    if payload.can_access_analytics is not None:
+        if admin.role != UserRole.OWNER and payload.can_access_analytics != user.can_access_analytics:
+            raise HTTPException(status_code=403, detail="Only the owner can change analytics access")
+        user.can_access_analytics = payload.can_access_analytics
     if payload.can_import_ios_photo_library and admin.role != UserRole.OWNER:
         raise HTTPException(
             status_code=403,
             detail="Only the owner can grant iPhone library import",
         )
     user.can_import_ios_photo_library = payload.can_import_ios_photo_library
+    if payload.can_import_android_photo_library is not None:
+        if admin.role != UserRole.OWNER and payload.can_import_android_photo_library != user.can_import_android_photo_library:
+            raise HTTPException(status_code=403, detail="Only the owner can change Android library import")
+        user.can_import_android_photo_library = payload.can_import_android_photo_library
     db.add(
         AuditLog(
             actor_id=admin.id,
@@ -291,13 +307,16 @@ def update_permissions(
                         "role": user.role.value,
                         "can_create_shared_workspaces": user.can_create_shared_workspaces,
                         "can_create_private_workspaces": user.can_create_private_workspaces,
+                        "can_delete_workspaces": user.can_delete_workspaces,
                         "can_add_comments": user.can_add_comments,
                         "can_upload_media": user.can_upload_media,
                         "can_view_all_calendars": user.can_view_all_calendars,
                         "can_access_admin": user.can_access_admin,
                         "can_access_chats": user.can_access_chats,
                         "can_access_content": user.can_access_content,
+                        "can_access_analytics": user.can_access_analytics,
                         "can_import_ios_photo_library": user.can_import_ios_photo_library,
+                        "can_import_android_photo_library": user.can_import_android_photo_library,
                     },
                 },
                 ensure_ascii=False,

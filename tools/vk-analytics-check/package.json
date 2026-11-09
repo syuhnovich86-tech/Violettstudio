@@ -1,0 +1,1 @@
+{"name":"vk-analytics-test","private":true,"version":"1.0.0","dependencies":{"@vkontakte/vk-bridge":"^3.0.2","esbuild":"^0.28.2"}}

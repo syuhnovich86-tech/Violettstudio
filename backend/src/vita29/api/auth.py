@@ -44,13 +44,16 @@ class UserResponse(BaseModel):
     is_active: bool
     can_create_shared_workspaces: bool
     can_create_private_workspaces: bool
+    can_delete_workspaces: bool
     can_add_comments: bool
     can_upload_media: bool
     can_view_all_calendars: bool
     can_access_admin: bool
     can_access_chats: bool
     can_access_content: bool
+    can_access_analytics: bool
     can_import_ios_photo_library: bool
+    can_import_android_photo_library: bool
 
 
 class SessionResponse(BaseModel):
@@ -67,12 +70,15 @@ def user_response(user: User) -> UserResponse:
         is_active=user.is_active,
         can_create_shared_workspaces=user.can_create_shared_workspaces,
         can_create_private_workspaces=user.can_create_private_workspaces,
+        can_delete_workspaces=user.role.value == "owner" or user.can_delete_workspaces,
         can_add_comments=user.can_add_comments,
         can_upload_media=user.can_upload_media,
         can_view_all_calendars=user.can_view_all_calendars,
         can_access_admin=user.role.value == "owner" or user.can_access_admin,
         can_access_chats=user.role.value == "owner" or user.can_access_chats,
         can_access_content=user.role.value == "owner" or user.can_access_content,
+        can_access_analytics=user.role.value in ("owner", "admin") or user.can_access_analytics,
+        can_import_android_photo_library=(user.role.value == "owner" or user.can_import_android_photo_library),
         can_import_ios_photo_library=(
             user.role.value == "owner" or user.can_import_ios_photo_library
         ),
