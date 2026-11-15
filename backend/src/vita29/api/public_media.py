@@ -1,14 +1,16 @@
 """Public delivery endpoint used only by opaque, short-lived Meta URLs."""
 
-from typing import Annotated
+import tempfile
+from pathlib import Path
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from vita29.content.public_links import token_digest
-from vita29.db.models import MediaFile, TemporaryPublicMediaLink, utc_now
+from vita29.db.models import MediaFile, MediaType, TemporaryPublicMediaLink, utc_now
 from vita29.db.session import get_db
 from vita29.media.storage import original_path
 from vita29.settings import Settings, get_settings
@@ -21,7 +23,8 @@ def temporary_public_media(
     token: str,
     db: Annotated[Session, Depends(get_db)],
     settings: Annotated[Settings, Depends(get_settings)],
-) -> FileResponse:
+    variant: Literal['story'] | None = None,
+) -> Response:
     """Serve one original only while its unguessable delivery token is alive."""
     link = db.scalar(
         select(TemporaryPublicMediaLink).where(
@@ -39,6 +42,17 @@ def temporary_public_media(
     path = original_path(settings, media.storage_key)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Файл не найден")
+    if variant == 'story':
+        if media.media_type != MediaType.IMAGE:
+            raise HTTPException(status_code=400, detail="Для истории требуется изображение")
+        from vita29.content.telegram_stories import _prepare_media, TelegramStoryNotPublishedError
+        try:
+            with tempfile.TemporaryDirectory(prefix='vita29-instagram-story-') as directory:
+                prepared, _ = _prepare_media(settings, media, Path(directory), 0)
+                image = prepared.read_bytes()
+        except (OSError, TelegramStoryNotPublishedError) as error:
+            raise HTTPException(status_code=422, detail="Не удалось подготовить изображение для истории") from error
+        return Response(content=image, media_type='image/jpeg', headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
     return FileResponse(
         path,
         media_type=media.mime_type,

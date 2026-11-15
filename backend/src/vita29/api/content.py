@@ -25,8 +25,10 @@ from vita29.content.agent import (
 )
 from vita29.content.availability_image import render_availability_image
 from vita29.content.instagram import InstagramPublishError, publish_to_instagram
+from vita29.content.text import normalize_pm
 from vita29.content.telegram import TelegramPublishError, publish_to_channel
 from vita29.content.visual import (
+    _wants_collage,
     append_editor_instruction,
     generate_branded_visual,
     requires_generated_visual,
@@ -51,6 +53,7 @@ from vita29.db.models import (
     utc_now,
 )
 from vita29.db.session import get_db
+from vita29.api.media_ordering import archive_date, phone_workspace_ids
 from vita29.settings import Settings, get_settings
 from vita29.workspaces.access import can_access_workspace
 from vita29.yclients.client import YclientsClient, YclientsError, get_yclients_client
@@ -119,6 +122,8 @@ class ArchiveReuseRequest(BaseModel):
 def validate_platform_formats(value):
     supported = {
         PublicationPlatform.TELEGRAM: {"post", "story"},
+        PublicationPlatform.TELEGRAM_STUDIO: {"story"},
+        PublicationPlatform.WHATSAPP_STUDIO: {"story"},
         PublicationPlatform.MAX: {"post", "story"},
         PublicationPlatform.INSTAGRAM: {"post", "story", "reel"},
         PublicationPlatform.VK: {"post"},
@@ -132,7 +137,7 @@ def validate_platform_formats(value):
 
 
 def selected_formats(formats, platform):
-    value = formats.get(platform, "post")
+    value = formats.get(platform, "story" if platform in {PublicationPlatform.TELEGRAM_STUDIO, PublicationPlatform.WHATSAPP_STUDIO} else "post")
     return [value] if isinstance(value, str) else value
 
 
@@ -220,6 +225,7 @@ class ContentLibraryMediaResponse(BaseModel):
     thumbnail_url: str
     comment: str | None
     content_marked: bool
+    publication_allowed: bool
     workspace_id: str
     workspace_name: str
 
@@ -316,13 +322,15 @@ def transcribe_content_voice(
 def content_media_library(
     user: Annotated[User, Depends(require_content_access)],
     db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
     workspace_id: Annotated[str | None, Query()] = None,
     search: Annotated[str | None, Query(max_length=160)] = None,
     limit: Annotated[int, Query(ge=1, le=120)] = 60,
     offset: Annotated[int, Query(ge=0)] = 0,
-    sort: Literal["priority", "recent"] = "priority",
+    sort: Literal["uploaded", "priority", "recent", "archive"] = "priority",
+    include_forbidden: bool = False,
 ) -> ContentLibraryResponse:
-    """List only media the editor can access and is permitted to publish."""
+    """List publishable media using the ordering explicitly requested by the client."""
     accessible_workspaces = [
         workspace for workspace in db.scalars(select(Workspace).where(Workspace.deleted_at.is_(None)).order_by(Workspace.display_name)).all()
         if can_access_workspace(db, workspace, user)
@@ -335,23 +343,25 @@ def content_media_library(
         return ContentLibraryResponse(items=[], workspaces=[], total=0, next_offset=None)
     filters = [
         MediaFile.deleted_at.is_(None),
-        MediaFile.publication_allowed.is_(True),
         MediaFile.media_type.in_([MediaType.IMAGE, MediaType.VIDEO]),
         MediaFile.workspace_id.in_(selected_ids),
     ]
+    if not include_forbidden:
+        filters.append(MediaFile.publication_allowed.is_(True))
     if search and search.strip():
         needle = f"%{search.strip()}%"
         filters.append(or_(MediaFile.original_name.ilike(needle), MediaFile.comment.ilike(needle)))
     total = db.scalar(select(func.count(MediaFile.id)).where(*filters)) or 0
     query = select(MediaFile).join(Workspace, MediaFile.workspace_id == Workspace.id).where(*filters)
-    if sort == "recent":
-        last_moves = (select(AuditLog.target_id.label("media_id"), func.max(AuditLog.created_at).label("moved_at"))
-                      .where(AuditLog.action == "media.move", AuditLog.target_type == "media_file")
-                      .group_by(AuditLog.target_id).subquery())
-        query = (query.outerjoin(last_moves, last_moves.c.media_id == MediaFile.id)
-                 .order_by(func.coalesce(last_moves.c.moved_at, MediaFile.created_at).desc(), MediaFile.id.desc()))
-    else:
+    phone_ids = phone_workspace_ids(db, settings.import_workspace_name)
+    if workspace_id in phone_ids:
+        query = query.order_by(MediaFile.captured_at.desc().nulls_last(), MediaFile.id.desc())
+    elif sort == "priority":
         query = query.order_by(MediaFile.content_marked.desc(), MediaFile.captured_at.desc(), MediaFile.created_at.desc(), MediaFile.id.desc())
+    elif sort == "archive":
+        query = query.order_by(archive_date(phone_ids).desc().nulls_last(), MediaFile.id.desc())
+    else:
+        query = query.order_by(MediaFile.created_at.desc(), MediaFile.id.desc())
     files = db.scalars(query.offset(offset).limit(limit)).all()
     return ContentLibraryResponse(
         items=[ContentLibraryMediaResponse(
@@ -361,6 +371,7 @@ def content_media_library(
             thumbnail_url=f"/api/v1/media/{file.id}/thumbnail",
             comment=file.comment,
             content_marked=file.content_marked,
+            publication_allowed=file.publication_allowed,
             workspace_id=file.workspace_id,
             workspace_name=file.workspace.display_name,
         )
@@ -492,9 +503,9 @@ def publication_response(publication: ContentPublication) -> ContentPublicationR
     )
 
 
-def get_item(db: Session, item_id: str) -> ContentItem:
+def get_item(db: Session, item_id: str, *, include_deleted: bool = False) -> ContentItem:
     item = db.get(ContentItem, item_id)
-    if item is None:
+    if item is None or (item.deleted_at is not None and not include_deleted):
         raise HTTPException(status_code=404, detail="Content item not found")
     return item
 
@@ -553,20 +564,58 @@ def collect_availability(
     # Never advertise a partly elapsed hour.  A card made at 15:22 may begin
     # only with 16:00 (or later), even if YCLIENTS still reports a 15:30 slot.
     local_now = datetime.now(local_timezone)
-    earliest_slot_time = (local_now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)).time()
+    earliest_slot_time = local_now.time()
     local_today = local_now.date()
-    week_end = week_start + timedelta(days=6)
     first_available_day = max(week_start, local_today)
+    # Search seven upcoming dates, including the next calendar week. Once
+    # today's final advertised start has passed, begin with tomorrow.
+    if first_available_day == local_today and earliest_slot_time > time(17, 30):
+        first_available_day += timedelta(days=1)
+    week_end = first_available_day + timedelta(days=6)
 
     slots: list[dict[str, object]] = []
     try:
         if first_available_day > week_end:
             return mappings, slots
         days_to_check = (week_end - first_available_day).days + 1
+        records = []
+        for page in range(1, 101):
+            batch = client.list_records(integration.salon_id, start_date=first_available_day.isoformat(), end_date=week_end.isoformat(), page=page, count=200)
+            records.extend(batch)
+            if len(batch) < 200:
+                break
+        else:
+            raise YclientsError('Too many calendar records to safely determine availability')
         for mapping in mappings:
+            minimum_minutes = 30 if mapping.staff_id == 3449724 else 60
             for offset in range(days_to_check):
                 day = first_available_day + timedelta(days=offset)
-                times = client.list_book_times(integration.salon_id, mapping.staff_id, day.isoformat())
+                times = client.list_book_times(integration.salon_id, mapping.staff_id, day.isoformat(), minimum_minutes=minimum_minutes)
+                busy = []
+                for record in records:
+                    staff = record.get('staff') or {}
+                    record_staff_id = record.get('staff_id') or (staff.get('id') if isinstance(staff, dict) else None)
+                    if str(record_staff_id) != str(mapping.staff_id) or record.get('deleted') or not str(record.get('datetime') or '').startswith(day.isoformat()):
+                        continue
+                    try:
+                        start = datetime.fromisoformat(record['datetime'])
+                        if start.tzinfo is None:
+                            start = start.replace(tzinfo=local_timezone)
+                        duration = int(record.get('seance_length') or record.get('length') or 0)
+                        if duration <= 0:
+                            raise ValueError('Missing duration')
+                        busy.append((start, start + timedelta(seconds=duration)))
+                    except (ValueError, TypeError):
+                        raise YclientsError('Cannot safely determine calendar record duration')
+                valid_times = []
+                for value in times:
+                    try:
+                        candidate = datetime.combine(day, time.fromisoformat(value[:5]), tzinfo=local_timezone)
+                    except ValueError:
+                        continue
+                    if candidate.time() <= time(17, 30) and candidate > local_now and not any(candidate < end and candidate + timedelta(minutes=minimum_minutes) > start for start, end in busy):
+                        valid_times.append(value)
+                times = valid_times
                 if day == local_today:
                     future_times: list[str] = []
                     for value in times:
@@ -582,7 +631,8 @@ def collect_availability(
                         "staff_id": mapping.staff_id,
                         "staff_name": mapping.staff_name,
                         "date": day.isoformat(),
-                        "times": times[:8],
+                        "times": times,
+                        "minimum_minutes": minimum_minutes,
                     })
     except YclientsError as error:
         raise HTTPException(
@@ -711,7 +761,7 @@ def reuse_archived_publication(
     source = db.get(ContentPublication, publication_id)
     if source is None or source.status != PublicationStatus.PUBLISHED:
         raise HTTPException(status_code=404, detail="Публикация в архиве не найдена")
-    original = get_item(db, source.content_item_id)
+    original = get_item(db, source.content_item_id, include_deleted=True)
     source_media = publication_response(source).media_ids
     if len(source_media) > 10:
         raise HTTPException(status_code=409, detail="В публикации слишком много материалов")
@@ -766,7 +816,7 @@ def list_content_items(
     ends_at = starts_at + timedelta(days=7)
     items = db.scalars(
         select(ContentItem)
-        .where(ContentItem.scheduled_at >= starts_at, ContentItem.scheduled_at < ends_at)
+        .where(ContentItem.deleted_at.is_(None), ContentItem.scheduled_at >= starts_at, ContentItem.scheduled_at < ends_at)
         .order_by(ContentItem.scheduled_at, ContentItem.created_at)
     ).all()
     return [response_for(db, item) for item in items]
@@ -786,7 +836,7 @@ def create_content_item(
         else validate_content_media_selection(db, user, payload.media_ids, payload.media_limit)
     )
     item = ContentItem(
-        title=payload.title.strip(),
+        title=normalize_pm(payload.title.strip()),
         caption=payload.caption.strip() if payload.caption else None,
         editor_instruction=payload.editor_instruction.strip() if payload.editor_instruction else None,
         visual_edit_requested=payload.visual_edit_requested,
@@ -830,7 +880,7 @@ def create_content_plan(
         if requested_at.astimezone(UTC) < next_automatic_slot:
             next_automatic_slot = scheduled_at + _GENERATION_SLOT
         item = ContentItem(
-            title=entry.title.strip(),
+            title=normalize_pm(entry.title.strip()),
             caption=None,
             visual_edit_requested=entry.visual_edit_requested,
             visual_style=entry.visual_style,
@@ -887,7 +937,7 @@ def update_content_item(
             db, user, changes["media_ids"], effective_limit
         )
     if "title" in changes:
-        item.title = changes["title"].strip()
+        item.title = normalize_pm(changes["title"].strip())
     if "caption" in changes:
         item.caption = changes["caption"].strip() if changes["caption"] else None
     if "editor_instruction" in changes:
@@ -1089,7 +1139,11 @@ def prepare_content_item(
     for publication in publications:
         if publication.media_override_ids_json is not None:
             validate_content_media_selection(db, user, json.loads(publication.media_override_ids_json), 10)
-    is_story_series = any(p.platform in {PublicationPlatform.INSTAGRAM, PublicationPlatform.TELEGRAM, PublicationPlatform.MAX} and p.publication_format == "story" for p in publications) and len(explicit_source_media) > 1
+    # An explicit collage request means one composed visual, even when one of
+    # the targets is a story. Otherwise multiple photos remain a story series.
+    is_story_series = (any(p.platform in {PublicationPlatform.INSTAGRAM, PublicationPlatform.TELEGRAM, PublicationPlatform.TELEGRAM_STUDIO, PublicationPlatform.WHATSAPP_STUDIO, PublicationPlatform.MAX} and p.publication_format == "story" for p in publications)
+                       and len(explicit_source_media) > 1
+                       and not _wants_collage(item.title, item.editor_instruction))
     if is_story_series and item.visual_edit_requested:
         raise HTTPException(status_code=422, detail="Для серии сторис сначала обработайте фотографии по отдельности, затем выберите готовые файлы.")
     if item.content_format == ContentFormat.AVAILABILITY:
@@ -1125,14 +1179,12 @@ def prepare_content_item(
         scheduled_day = item.scheduled_at.astimezone(
             timezone(timedelta(hours=settings.local_utc_offset_hours))
         ).date()
-        # The template is a Monday-to-Sunday card.  Pass the beginning of its
-        # calendar week so a Tuesday publication does not accidentally put the
-        # following Monday into the first row of the current card.
-        template_week_start = scheduled_day - timedelta(days=scheduled_day.weekday())
+        # Rows contain explicit dates; a rolling seven-day period has exactly
+        # one of each weekday and can safely cross the calendar-week boundary.
         _, slots = collect_availability(
             db,
             YclientsClient(settings),
-            template_week_start,
+            scheduled_day,
             item.availability_staff_id,
         )
         if not slots:
@@ -1141,9 +1193,10 @@ def prepare_content_item(
                 None,
             )
             master_name = mapping.staff_name if mapping else "выбранного мастера"
+            minimum_minutes = 30 if item.availability_staff_id == 3449724 else 60
             message = (
                 f"У мастера «{master_name}» в YCLIENTS нет свободных окон "
-                "для онлайн-записи длительностью от часа на ближайшие 7 дней. "
+                f"для онлайн-записи длительностью от {minimum_minutes} минут на ближайшие 7 дней. "
                 "Карточка не собрана: проверьте график и онлайн-запись в YCLIENTS "
                 "либо выберите другого мастера."
             )
@@ -1341,8 +1394,6 @@ def update_publication_media(
     ids = validate_content_media_selection(db, user, payload.media_ids, 10)
     files = {m.id: m for m in db.scalars(select(MediaFile).where(MediaFile.id.in_(ids))).all()}
     if platform == PublicationPlatform.INSTAGRAM:
-        if any(files[i].workspace.kind != WorkspaceKind.STUDIO for i in ids):
-            raise HTTPException(status_code=422, detail="Для Instagram нужны материалы из общей папки")
         if publication.publication_format == "reel" and (len(ids) != 1 or files[ids[0]].media_type != MediaType.VIDEO):
             raise HTTPException(status_code=422, detail="Для Reels выберите одно видео")
     publication.media_override_ids_json = json.dumps(ids)
@@ -1473,6 +1524,7 @@ def confirm_publication_not_published(
     _: Annotated[AuthSession, Depends(require_csrf)],
     user: Annotated[User, Depends(require_content_access)],
     db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
     publication_id: str | None = None,
 ) -> ContentItemResponse:
     item = get_item(db, item_id)
@@ -1486,6 +1538,15 @@ def confirm_publication_not_published(
     if claim.rowcount != 1:
         db.rollback()
         raise HTTPException(status_code=409, detail="Статус уже изменился")
+    if platform == PublicationPlatform.WHATSAPP_STUDIO:
+        from vita29.content.whatsapp_stories import WhatsAppBridge, WhatsAppNotPublishedError, WhatsAppUncertainError
+        try:
+            WhatsAppBridge(settings.integration_secrets_path.parent / 'whatsapp' / 'bridge.sock').request(
+                'POST', '/confirm-not-sent', json={'id': f'{publication.id}:0'},
+            )
+        except (WhatsAppNotPublishedError, WhatsAppUncertainError) as error:
+            db.rollback()
+            raise HTTPException(status_code=409, detail=str(error)) from error
     publication.error = None
     other_scheduled = db.scalar(select(ContentPublication.id).where(ContentPublication.content_item_id == item.id, ContentPublication.id != publication.id, ContentPublication.status == PublicationStatus.SCHEDULED).limit(1))
     item.status = ContentStatus.SCHEDULED if other_scheduled else ContentStatus.READY
@@ -1549,11 +1610,9 @@ def publish_telegram_content_item(
                 MediaFile.publication_allowed.is_(True),
             )
         )
-        if not mobile:
-            media_query = media_query.where(Workspace.kind == WorkspaceKind.STUDIO)
         media_files = db.scalars(media_query).all()
         by_id = {media.id: media for media in media_files}
-        if len(by_id) != len(media_ids) or (mobile and any(not can_access_workspace(db, media.workspace, user) for media in media_files)):
+        if len(by_id) != len(media_ids) or any(not can_access_workspace(db, media.workspace, user) for media in media_files):
             raise HTTPException(
                 status_code=409,
                 detail="One of the selected files is no longer available for publication",
@@ -1563,7 +1622,7 @@ def publish_telegram_content_item(
         snapshot_publication(settings, publication.id, media_files)
     except (OSError, ValueError) as error:
         raise HTTPException(status_code=409, detail="Не удалось сохранить материалы в архиве; публикация не отправлена") from error
-    claimed = db.execute(update(ContentPublication).where(ContentPublication.id == publication.id, ContentPublication.status.in_([PublicationStatus.PENDING, PublicationStatus.SCHEDULED, PublicationStatus.FAILED])).values(status=PublicationStatus.PUBLISHING, error=None))
+    claimed = db.execute(update(ContentPublication).where(ContentPublication.id == publication.id, ContentPublication.content_item_id.in_(select(ContentItem.id).where(ContentItem.deleted_at.is_(None))), ContentPublication.status.in_([PublicationStatus.PENDING, PublicationStatus.SCHEDULED, PublicationStatus.FAILED])).values(status=PublicationStatus.PUBLISHING, error=None))
     if claimed.rowcount != 1:
         db.rollback()
         raise HTTPException(status_code=409, detail="Публикация уже отправлена или отправляется")
@@ -1630,18 +1689,17 @@ def publish_instagram_content_item(
             MediaFile.id.in_(media_ids),
             MediaFile.deleted_at.is_(None),
             MediaFile.publication_allowed.is_(True),
-            Workspace.kind == WorkspaceKind.STUDIO,
         )
     ).all()
     by_id = {media.id: media for media in media_files}
-    if len(by_id) != len(media_ids):
+    if len(by_id) != len(media_ids) or any(not can_access_workspace(db, media.workspace, user) for media in media_files):
         raise HTTPException(status_code=409, detail="Один из материалов больше недоступен для публикации")
     media_files = [by_id[media_id] for media_id in media_ids]
     try:
         snapshot_publication(settings, publication.id, media_files)
     except (OSError, ValueError) as error:
         raise HTTPException(status_code=409, detail="Не удалось сохранить материалы в архиве; публикация не отправлена") from error
-    claimed = db.execute(update(ContentPublication).where(ContentPublication.id == publication.id, ContentPublication.status.in_([PublicationStatus.PENDING, PublicationStatus.SCHEDULED, PublicationStatus.FAILED])).values(status=PublicationStatus.PUBLISHING, error=None))
+    claimed = db.execute(update(ContentPublication).where(ContentPublication.id == publication.id, ContentPublication.content_item_id.in_(select(ContentItem.id).where(ContentItem.deleted_at.is_(None))), ContentPublication.status.in_([PublicationStatus.PENDING, PublicationStatus.SCHEDULED, PublicationStatus.FAILED])).values(status=PublicationStatus.PUBLISHING, error=None))
     if claimed.rowcount != 1:
         db.rollback()
         raise HTTPException(status_code=409, detail="Публикация уже отправлена или отправляется")
@@ -1677,21 +1735,32 @@ def publish_instagram_content_item(
 def delete_content_item(
     item_id: str,
     _: Annotated[AuthSession, Depends(require_csrf)],
-    __: Annotated[User, Depends(require_content_access)],
+    user: Annotated[User, Depends(require_content_access)],
     db: Annotated[Session, Depends(get_db)],
 ) -> None:
-    item = get_item(db, item_id)
+    item = get_item(db, item_id, include_deleted=True)
     db.execute(update(ContentItem).where(ContentItem.id == item.id).values(updated_at=utc_now()))
     db.refresh(item)
+    if item.deleted_at is not None:
+        db.rollback()
+        return
+    if item.status == ContentStatus.GENERATING:
+        raise HTTPException(status_code=409, detail="Материал ещё создаётся; дождитесь завершения")
     if db.scalar(select(ContentPublication.id).where(ContentPublication.content_item_id == item.id, ContentPublication.status == PublicationStatus.PUBLISHING).limit(1)):
         raise HTTPException(status_code=409, detail="Публикация уже отправляется; дождитесь результата")
-    published = db.scalar(
-        select(ContentPublication.id).where(
-            ContentPublication.content_item_id == item.id,
-            ContentPublication.status == PublicationStatus.PUBLISHED,
-        ).limit(1)
-    )
-    if published:
-        raise HTTPException(status_code=409, detail="Published content cannot be deleted")
-    db.delete(item)
+    publication_ids = select(ContentPublication.id).where(ContentPublication.content_item_id == item.id)
+    if db.scalar(select(ScheduledPublicationJob.publication_id).where(
+        ScheduledPublicationJob.publication_id.in_(publication_ids),
+        ScheduledPublicationJob.state == "sending",
+    ).limit(1)):
+        raise HTTPException(status_code=409, detail="Публикация уже отправляется; дождитесь результата")
+    # Keep provider IDs and unknown outcomes for reconciliation and archive reuse.
+    # Cancel only unclaimed queue entries in the same transaction as the tombstone.
+    db.execute(update(ScheduledPublicationJob).where(
+        ScheduledPublicationJob.publication_id.in_(publication_ids),
+        ScheduledPublicationJob.state == "queued",
+    ).values(state="cancelled", updated_at=utc_now()))
+    item.deleted_at = utc_now()
+    db.add(AuditLog(actor_id=user.id, action="content.plan.remove", target_type="content_item",
+                    target_id=item.id, details=json.dumps({"published_history_preserved": True})))
     db.commit()

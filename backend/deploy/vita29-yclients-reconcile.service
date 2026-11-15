@@ -1,0 +1,9 @@
+[Unit]
+Description=Refresh YCLIENTS calendar including cancelled visits
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker exec deploy-app-1 python -m vita29.yclients.reconcile
+TimeoutStartSec=1800

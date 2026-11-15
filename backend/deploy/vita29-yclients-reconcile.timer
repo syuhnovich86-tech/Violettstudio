@@ -1,0 +1,10 @@
+[Unit]
+Description=Hourly YCLIENTS calendar reconciliation
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=vita29-yclients-reconcile.service
+
+[Install]
+WantedBy=timers.target

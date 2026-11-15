@@ -16,6 +16,7 @@ from vita29.content.max_publisher import publish_to_max
 from vita29.content.max_stories import MaxStoryNotPublishedError, publish_max_stories
 from vita29.content.telegram import publish_to_channel
 from vita29.content.telegram_stories import TelegramStoryNotPublishedError, publish_telegram_stories
+from vita29.content.whatsapp_stories import WhatsAppBridge, WhatsAppNotPublishedError, publish_whatsapp_stories
 from vita29.integrations.store import secret_is_configured
 from vita29.content.vk_publisher import VKNotPublishedError, publish_to_vk
 from vita29.db.models import (
@@ -48,8 +49,6 @@ def validate_media(db, item, publication, user):
         media = by_id.get(media_id)
         if media is None or media.deleted_at is not None or not media.publication_allowed or not can_access_workspace(db, media.workspace, user):
             raise ValueError("Один из материалов недоступен для публикации")
-        if publication.platform in {PublicationPlatform.INSTAGRAM, PublicationPlatform.THREADS} and media.workspace.kind != WorkspaceKind.STUDIO:
-            raise ValueError("Для Instagram нужны материалы из общей папки")
         files.append(media)
     if publication.platform == PublicationPlatform.INSTAGRAM and not files:
         raise ValueError("Для Instagram нужно фото или видео")
@@ -61,6 +60,21 @@ def validate_media(db, item, publication, user):
         settings = get_settings()
         if not secret_is_configured(settings, 'telegram_story_session', settings.integration_secrets_path / 'unused'):
             raise ValueError("Подключите аккаунт администратора Telegram для историй в настройках")
+    if publication.platform == PublicationPlatform.TELEGRAM_STUDIO:
+        if publication.publication_format != 'story' or not files:
+            raise ValueError('Для истории Telegram выберите фото или видео')
+        settings = get_settings()
+        if not secret_is_configured(settings, 'telegram_studio_story_session', settings.integration_secrets_path / 'unused'):
+            raise ValueError('Подключите Telegram аккаунт студии для историй')
+    if publication.platform == PublicationPlatform.WHATSAPP_STUDIO:
+        if publication.publication_format != 'story' or not files:
+            raise ValueError('Для статуса WhatsApp выберите фото или видео')
+        try:
+            state = WhatsAppBridge(get_settings().integration_secrets_path.parent / 'whatsapp' / 'bridge.sock', timeout=5).request('GET', '/status')
+        except Exception as error:
+            raise ValueError('Подключение WhatsApp недоступно') from error
+        if state.get('status') != 'connected':
+            raise ValueError('Подключите WhatsApp аккаунт студии')
     if publication.platform == PublicationPlatform.MAX and publication.publication_format not in {"post", "story"}:
         raise ValueError("В MAX доступны посты и истории")
     if publication.platform == PublicationPlatform.MAX and publication.publication_format == "story":
@@ -99,6 +113,8 @@ def approve(db: Session, item: ContentItem, user: User):
     # Serialize approval against a worker claiming a due publication.
     db.execute(update(ContentItem).where(ContentItem.id == item.id).values(updated_at=utc_now()))
     db.refresh(item)
+    if item.deleted_at is not None:
+        raise ValueError("Карточка удалена из плана")
     if not item.publication_date_assigned:
         raise ValueError("Назначьте дату и время публикации")
     scheduled = item.scheduled_at.replace(tzinfo=UTC) if item.scheduled_at.tzinfo is None else item.scheduled_at.astimezone(UTC)
@@ -114,7 +130,7 @@ def approve(db: Session, item: ContentItem, user: User):
     for publication in pending:
         if publication.status == PublicationStatus.PUBLISHING:
             raise ValueError("Публикация уже отправляется")
-        if not (publication.platform == PublicationPlatform.MAX and publication.publication_format == "story") and not getattr(configured, publication.platform.value).configured:
+        if publication.platform not in {PublicationPlatform.TELEGRAM_STUDIO, PublicationPlatform.WHATSAPP_STUDIO} and not (publication.platform == PublicationPlatform.MAX and publication.publication_format == "story") and not getattr(configured, publication.platform.value).configured:
             raise ValueError(f"Площадка {publication.platform.value.upper()} не настроена")
         validate_media(db, item, publication, user)
         job = db.get(ScheduledPublicationJob, publication.id)
@@ -143,6 +159,8 @@ def approve(db: Session, item: ContentItem, user: User):
 
 def publish_now(db: Session, item: ContentItem, publication: ContentPublication, user: User):
     """Publish one explicitly selected platform, recording uncertain outcomes."""
+    if item.deleted_at is not None:
+        raise ValueError("Карточка удалена из плана")
     if item.publication_date_assigned:
         raise ValueError("Уберите назначенную дату, чтобы разместить сейчас")
     if item.status not in {ContentStatus.READY, ContentStatus.FAILED}:
@@ -153,7 +171,7 @@ def publish_now(db: Session, item: ContentItem, publication: ContentPublication,
     if job and job.state in {"queued", "sending", "unknown", "done"}:
         raise ValueError("Проверьте статус предыдущей отправки или отмените расписание")
     settings = get_settings()
-    if not (publication.platform == PublicationPlatform.MAX and publication.publication_format == "story") and not getattr(_status(settings), publication.platform.value).configured:
+    if publication.platform not in {PublicationPlatform.TELEGRAM_STUDIO, PublicationPlatform.WHATSAPP_STUDIO} and not (publication.platform == PublicationPlatform.MAX and publication.publication_format == "story") and not getattr(_status(settings), publication.platform.value).configured:
         raise ValueError(f"Площадка {publication.platform.value.upper()} не настроена")
     files = validate_media(db, item, publication, user)
     try:
@@ -163,6 +181,7 @@ def publish_now(db: Session, item: ContentItem, publication: ContentPublication,
     claim = db.execute(update(ContentPublication).where(
         ContentPublication.id == publication.id,
         ContentPublication.status.in_([PublicationStatus.PENDING, PublicationStatus.FAILED]),
+        ContentPublication.content_item_id.in_(select(ContentItem.id).where(ContentItem.deleted_at.is_(None))),
     ).values(status=PublicationStatus.PUBLISHING, error=None))
     if claim.rowcount != 1:
         db.rollback()
@@ -180,7 +199,11 @@ def publish_now(db: Session, item: ContentItem, publication: ContentPublication,
     db.commit()
     db.refresh(publication)
     try:
-        if publication.platform == PublicationPlatform.TELEGRAM:
+        if publication.platform == PublicationPlatform.WHATSAPP_STUDIO:
+            external_id = publish_whatsapp_stories(db, settings, publication, publication.caption, files)
+        elif publication.platform == PublicationPlatform.TELEGRAM_STUDIO:
+            external_id = publish_telegram_stories(db, settings, publication, publication.caption, files, target='studio')
+        elif publication.platform == PublicationPlatform.TELEGRAM:
             external_id = publish_telegram_stories(db, settings, publication, publication.caption, files) if publication.publication_format == 'story' else publish_to_channel(settings, publication.caption, files)
         elif publication.platform == PublicationPlatform.INSTAGRAM:
             external_id = publish_to_instagram(db, settings, publication, publication.caption, files)
@@ -197,7 +220,7 @@ def publish_now(db: Session, item: ContentItem, publication: ContentPublication,
         publication = db.get(ContentPublication, publication.id)
         item = db.get(ContentItem, item.id)
         publication.status = PublicationStatus.FAILED
-        safely_not_published = isinstance(error, (InstagramNotPublishedError, ThreadsNotPublishedError, VKNotPublishedError, TelegramStoryNotPublishedError, MaxStoryNotPublishedError))
+        safely_not_published = isinstance(error, (InstagramNotPublishedError, ThreadsNotPublishedError, VKNotPublishedError, TelegramStoryNotPublishedError, MaxStoryNotPublishedError, WhatsAppNotPublishedError))
         publication.error = (str(error)[:200] if safely_not_published else "Часть сторис подтверждена. Проверьте площадку перед повтором." if publication.publication_format == "story" and publication.external_id else "Не удалось подтвердить отправку. Проверьте площадку перед повтором.")
         job.state = "failed" if safely_not_published else "unknown"
         job.updated_at = utc_now()
@@ -224,13 +247,13 @@ def deliver_one(session_factory, publication_id):
             return False
         publication = db.get(ContentPublication, publication_id)
         item = db.get(ContentItem, publication.content_item_id) if publication else None
-        if item is None or item.status not in {ContentStatus.SCHEDULED, ContentStatus.FAILED} or not item.publication_date_assigned:
+        if item is None or item.deleted_at is not None or item.status not in {ContentStatus.SCHEDULED, ContentStatus.FAILED} or not item.publication_date_assigned:
             return False
         now = utc_now()
         scheduled = item.scheduled_at.replace(tzinfo=UTC) if item.scheduled_at.tzinfo is None else item.scheduled_at.astimezone(UTC)
         if scheduled > now:
             return False
-        still_due = select(ContentItem.id).join(ContentPublication, ContentPublication.content_item_id == ContentItem.id).where(ContentPublication.id == publication_id, ContentItem.status.in_([ContentStatus.SCHEDULED, ContentStatus.FAILED]), ContentItem.publication_date_assigned.is_(True), ContentItem.scheduled_at <= now).exists()
+        still_due = select(ContentItem.id).join(ContentPublication, ContentPublication.content_item_id == ContentItem.id).where(ContentPublication.id == publication_id, ContentItem.deleted_at.is_(None), ContentItem.status.in_([ContentStatus.SCHEDULED, ContentStatus.FAILED]), ContentItem.publication_date_assigned.is_(True), ContentItem.scheduled_at <= now).exists()
         claim = db.execute(update(ScheduledPublicationJob).where(ScheduledPublicationJob.publication_id == publication_id, ScheduledPublicationJob.state == "queued", still_due).values(state="sending", updated_at=now))
         if claim.rowcount != 1:
             db.rollback()
@@ -252,7 +275,11 @@ def deliver_one(session_factory, publication_id):
             settings = get_settings()
             snapshot_publication(settings, publication.id, files)
             attempted = True
-            if publication.platform == PublicationPlatform.TELEGRAM:
+            if publication.platform == PublicationPlatform.WHATSAPP_STUDIO:
+                external_id = publish_whatsapp_stories(db, settings, publication, publication.caption, files)
+            elif publication.platform == PublicationPlatform.TELEGRAM_STUDIO:
+                external_id = publish_telegram_stories(db, settings, publication, publication.caption, files, target='studio')
+            elif publication.platform == PublicationPlatform.TELEGRAM:
                 external_id = publish_telegram_stories(db, settings, publication, publication.caption, files) if publication.publication_format == 'story' else publish_to_channel(settings, publication.caption, files)
             elif publication.platform == PublicationPlatform.INSTAGRAM:
                 external_id = publish_to_instagram(db, settings, publication, publication.caption, files)
@@ -274,10 +301,10 @@ def deliver_one(session_factory, publication_id):
             publication = db.get(ContentPublication, publication_id)
             item = db.get(ContentItem, publication.content_item_id)
             publication.status = PublicationStatus.FAILED
-            safely_not_published = isinstance(error, (InstagramNotPublishedError, ThreadsNotPublishedError, VKNotPublishedError, TelegramStoryNotPublishedError, MaxStoryNotPublishedError))
+            safely_not_published = isinstance(error, (InstagramNotPublishedError, ThreadsNotPublishedError, VKNotPublishedError, TelegramStoryNotPublishedError, MaxStoryNotPublishedError, WhatsAppNotPublishedError))
             if safely_not_published:
                 publication.error = str(error)[:200]
-            elif attempted and publication.platform in {PublicationPlatform.INSTAGRAM, PublicationPlatform.TELEGRAM, PublicationPlatform.MAX} and publication.publication_format == "story" and publication.external_id:
+            elif attempted and publication.platform in {PublicationPlatform.INSTAGRAM, PublicationPlatform.TELEGRAM, PublicationPlatform.TELEGRAM_STUDIO, PublicationPlatform.WHATSAPP_STUDIO, PublicationPlatform.MAX} and publication.publication_format == "story" and publication.external_id:
                 publication.error = "Часть сторис подтверждена. Проверьте площадку перед повтором: последняя отправка могла пройти."
             else:
                 publication.error = "Не удалось подтвердить отправку. Проверьте площадку перед повтором." if attempted else str(error)[:200]
@@ -309,7 +336,7 @@ def run_due(session_factory):
             job.updated_at = utc_now()
         if stale:
             db.commit()
-        ids = db.scalars(select(ScheduledPublicationJob.publication_id).join(ContentPublication, ContentPublication.id == ScheduledPublicationJob.publication_id).join(ContentItem, ContentItem.id == ContentPublication.content_item_id).where(ScheduledPublicationJob.state == "queued", ContentItem.status.in_([ContentStatus.SCHEDULED, ContentStatus.FAILED]), ContentItem.publication_date_assigned.is_(True), ContentItem.scheduled_at <= utc_now()).limit(20)).all()
+        ids = db.scalars(select(ScheduledPublicationJob.publication_id).join(ContentPublication, ContentPublication.id == ScheduledPublicationJob.publication_id).join(ContentItem, ContentItem.id == ContentPublication.content_item_id).where(ScheduledPublicationJob.state == "queued", ContentItem.deleted_at.is_(None), ContentItem.status.in_([ContentStatus.SCHEDULED, ContentStatus.FAILED]), ContentItem.publication_date_assigned.is_(True), ContentItem.scheduled_at <= utc_now()).limit(20)).all()
     if ids:
         with ThreadPoolExecutor(max_workers=3) as executor:
             list(executor.map(lambda publication_id: deliver_one(session_factory, publication_id), ids))

@@ -4,18 +4,20 @@ import { useIsFocused } from '@react-navigation/native';
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
-import { useEffect, useMemo, useState } from 'react';
-import { Alert, Modal, Platform, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { useEffect, useMemo, useRef, useState, type ComponentRef } from 'react';
+import { Alert, Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { authorizedSource, createWorkspace, deleteMedia, deleteWorkspace, getMediaFilterOptions, listMedia, listWorkspaces, moveMedia, setMediaComment, setMediaContentMark, setMediaPublication, type MediaFile, type Workspace } from '../api/client';
 import { useAuth } from '../auth/AuthProvider';
 import { saveToGallery } from '../media/saveToGallery';
+import { nextMediaPage } from '../media/yearNavigation';
 import { Busy, Empty, ErrorState, Field, PrimaryButton, Sheet, formatBytes } from '../components/Common';
 import { PageHeader } from '../components/PageHeader';
 import { ProtectedImage } from '../components/ProtectedImage';
 import { ProtectedVideo } from '../components/ProtectedVideo';
 import { Screen } from '../components/Screen';
+import { YearRail } from '../components/YearRail';
 import { colors, typography } from '../theme';
 import type { RootTabs } from '../navigation/types';
 
@@ -32,6 +34,9 @@ export function MediaScreen({ route, navigation }: BottomTabScreenProps<RootTabs
   const [clientName, setClientName] = useState('');
   const [procedure, setProcedure] = useState('');
   const [filterSheet, setFilterSheet] = useState(false);
+  const [extraFilters, setExtraFilters] = useState(false);
+  const [browseYear, setBrowseYear] = useState<number | undefined>();
+  const yearsRef = useRef<number[]>([]);
   const [selected, setSelected] = useState<MediaFile | null>(null);
   const [photoOpen, setPhotoOpen] = useState(false);
   const [folderSheet, setFolderSheet] = useState(false);
@@ -39,18 +44,22 @@ export function MediaScreen({ route, navigation }: BottomTabScreenProps<RootTabs
   const [folderKind, setFolderKind] = useState<Workspace['kind']>('private');
   const [comment, setComment] = useState('');
   const [busy, setBusy] = useState(false);
+  const scrollRef = useRef<ComponentRef<typeof ScrollView>>(null);
+  const resultsY = useRef(0);
+  const filterY = useRef(0);
   useEffect(() => { if (route.params?.workspaceId) setWorkspaceId(route.params.workspaceId); }, [route.params?.workspaceId]);
   useEffect(() => { if (workspaces.isSuccess && workspaceId && !workspaces.data.some((item) => item.id === workspaceId)) { setWorkspaceId(''); setSelected(null); } }, [workspaceId, workspaces.data, workspaces.isSuccess]);
-  useEffect(() => { setYear(undefined); setMonth(undefined); setPlace(undefined); setClientName(''); setProcedure(''); }, [workspaceId]);
+  useEffect(() => { setYear(undefined); setMonth(undefined); setPlace(undefined); setClientName(''); setProcedure(''); setBrowseYear(undefined); setFilterSheet(false); }, [workspaceId]);
   useEffect(() => { if (route.params?.visitId) { setWorkspaceId(''); setSearch(''); } }, [route.params?.visitId]);
   useEffect(() => { setComment(selected?.comment ?? ''); }, [selected]);
   const media = useInfiniteQuery({
-    queryKey: ['media', workspaceId, route.params?.visitId, year, month, place, clientName, procedure, (Platform.OS === 'android' || Platform.OS === 'ios') ? search : ''],
-    initialPageParam: 0,
-    queryFn: ({ pageParam }) => listMedia({ workspace_id: workspaceId || undefined, yclients_record_id: route.params?.visitId, capture_year: workspaceId ? year : undefined, capture_month: workspaceId ? month : undefined, location_key: workspaceId ? place : undefined, client: workspaceId ? clientName.trim() || undefined : undefined, procedure: workspaceId ? procedure.trim() || undefined : undefined, q: (Platform.OS === 'android' || Platform.OS === 'ios') ? search.trim() || undefined : undefined, limit: 100, offset: pageParam }),
-    getNextPageParam: (lastPage, pages) => lastPage.length === 100 ? pages.length * 100 : undefined,
+    queryKey: ['media', workspaceId, route.params?.visitId, year, month, place, clientName, procedure, search, browseYear],
+    initialPageParam: { offset: 0, browseYear },
+    queryFn: ({ pageParam }) => listMedia({ workspace_id: workspaceId || undefined, yclients_record_id: route.params?.visitId, capture_year: workspaceId ? year ?? pageParam.browseYear : undefined, capture_month: workspaceId ? month : undefined, location_key: workspaceId ? place : undefined, client: workspaceId ? clientName.trim() || undefined : undefined, procedure: workspaceId ? procedure.trim() || undefined : undefined, q: search.trim() || undefined, limit: 100, offset: pageParam.offset }),
+    getNextPageParam: (lastPage, _pages, lastParam) => nextMediaPage(lastPage.length, lastParam, year, yearsRef.current),
   });
-  const filterOptions = useQuery({ queryKey: ['media-filter-options', workspaceId, year, month], queryFn: () => getMediaFilterOptions(workspaceId, year, month), enabled: (Platform.OS === 'android' || Platform.OS === 'ios') && !!workspaceId });
+  const filterOptions = useQuery({ queryKey: ['media-filter-options', workspaceId, year, month], queryFn: () => getMediaFilterOptions(workspaceId, year, month), enabled: (Platform.OS === 'android' || Platform.OS === 'ios') && !!workspaceId, placeholderData: (previous, previousQuery) => previousQuery?.queryKey[1] === workspaceId ? previous : undefined });
+  yearsRef.current = filterOptions.data?.years ?? [];
   const monthOptions = useMemo(() => Array.from(new Set((filterOptions.data?.months ?? []).filter((entry) => !year || entry.year === year).map((entry) => entry.month))).sort((a, b) => a - b), [filterOptions.data, year]);
   const allMedia = useMemo(() => media.data?.pages.flat() ?? [], [media.data]);
   const visible = useMemo(() => (Platform.OS === 'android' || Platform.OS === 'ios') ? allMedia : allMedia.filter((item) => !search.trim() || `${item.original_name} ${item.owner_name} ${item.workspace_name} ${item.comment ?? ''}`.toLocaleLowerCase('ru-RU').includes(search.trim().toLocaleLowerCase('ru-RU'))), [allMedia, search]);
@@ -76,21 +85,36 @@ export function MediaScreen({ route, navigation }: BottomTabScreenProps<RootTabs
     } catch (error) { Alert.alert('Не удалось скачать', error instanceof Error ? error.message : 'Ошибка файла'); }
     finally { setBusy(false); }
   }
-  return <Screen>
+  return <Screen scrollRef={scrollRef} onScroll={(event) => { const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent; if (contentOffset.y + layoutMeasurement.height > contentSize.height - 600 && media.hasNextPage && !media.isFetchingNextPage) void media.fetchNextPage(); }} overlay={workspaceId && !year && !month && !place && !clientName && !procedure && !search && !filterSheet ? <YearRail years={yearsRef.current} selected={browseYear} onSelect={(value) => { setBrowseYear(value); scrollRef.current?.scrollTo({ y: Math.max(0, resultsY.current - 12), animated: false }); }} /> : undefined}>
     <PageHeader kicker="Медиацентр" title="Архив" subtitle={route.params?.visitId ? 'Материалы выбранного визита' : 'Реальные папки и файлы с сервера'} action="add-outline" onAction={() => setFolderSheet(true)} />
-    <View style={styles.search}><Ionicons name="search" size={18} color={colors.muted} /><TextInput value={search} onChangeText={setSearch} placeholder="Поиск по файлам и комментариям" placeholderTextColor={colors.muted} style={styles.searchInput} /></View>
+    <View style={styles.search}><Ionicons name="search" size={18} color={colors.muted} /><TextInput value={search} onChangeText={(value) => { setBrowseYear(undefined); setSearch(value); }} placeholder="Поиск по файлам и комментариям" placeholderTextColor={colors.muted} style={styles.searchInput} /></View>
     {workspaces.isLoading ? <Busy label="Загружаю папки…" /> : workspaces.error ? <ErrorState message={(workspaces.error as Error).message} onRetry={() => void workspaces.refetch()} /> : <View style={styles.folders}>
       <Pressable onPress={() => setWorkspaceId('')} style={[styles.folder, !workspaceId && styles.folderActive]}><Ionicons name="albums-outline" size={18} color={!workspaceId ? colors.white : colors.gold} /><Text numberOfLines={1} style={[styles.folderText, !workspaceId && styles.folderTextActive]}>Все</Text></Pressable>
-      {(workspaces.data ?? []).map((folder) => <Pressable key={folder.id} onPress={() => setWorkspaceId(folder.id)} style={[styles.folder, workspaceId === folder.id && styles.folderActive]}><Ionicons name={folder.kind === 'private' ? 'lock-closed-outline' : 'folder-open-outline'} size={18} color={workspaceId === folder.id ? colors.white : colors.gold} /><View style={styles.folderCopy}><Text numberOfLines={1} style={[styles.folderText, workspaceId === folder.id && styles.folderTextActive]}>{folder.display_name}</Text><Text style={[styles.folderCount, workspaceId === folder.id && styles.folderTextActive]}>{folder.file_count} · {formatBytes(folder.size_bytes)}</Text></View></Pressable>)}
-      {media.hasNextPage ? <View style={styles.more}><PrimaryButton title={media.isFetchingNextPage ? 'Загружаю…' : 'Показать ещё'} disabled={media.isFetchingNextPage} onPress={() => void media.fetchNextPage()} /></View> : null}
+      {(workspaces.data ?? []).filter((folder) => !workspaceId || folder.id === workspaceId).map((folder) => <Pressable key={folder.id} onPress={() => setWorkspaceId(folder.id)} style={[styles.folder, workspaceId === folder.id && styles.folderActive]}><Ionicons name={folder.kind === 'private' ? 'lock-closed-outline' : 'folder-open-outline'} size={18} color={workspaceId === folder.id ? colors.white : colors.gold} /><View style={styles.folderCopy}><Text numberOfLines={1} style={[styles.folderText, workspaceId === folder.id && styles.folderTextActive]}>{folder.display_name}</Text><Text style={[styles.folderCount, workspaceId === folder.id && styles.folderTextActive]}>{folder.file_count} · {formatBytes(folder.size_bytes)}</Text></View></Pressable>)}
     </View>}
-    {(Platform.OS === 'android' || Platform.OS === 'ios') && workspaceId ? <PrimaryButton title={`Фильтры архива${year || month || place || clientName || procedure ? ' • выбраны' : ''}`} icon="filter-outline" onPress={() => setFilterSheet(true)} /> : null}
-    {(Platform.OS === 'android' || Platform.OS === 'ios') && workspaceId && user?.can_upload_media ? <PrimaryButton title="Добавить фото из галереи" icon="images-outline" onPress={() => navigation.navigate('Add', { workspaceId })} /> : null}
-    {(Platform.OS === 'android' || Platform.OS === 'ios') && workspaceId && user?.can_delete_workspaces ? <PrimaryButton title="Удалить выбранную папку" icon="trash-outline" tone="danger" disabled={busy} onPress={() => {
+    {(Platform.OS === 'android' || Platform.OS === 'ios') && workspaceId ? <View onLayout={(event) => { filterY.current = event.nativeEvent.layout.y; }}><PrimaryButton title={`Фильтры архива${year || month || place || clientName || procedure ? ' • выбраны' : ''}${filterSheet ? ' ↑' : ' ↓'}`} icon="filter-outline" onPress={() => { const opening = !filterSheet; setFilterSheet(opening); if (opening) setTimeout(() => scrollRef.current?.scrollTo({ y: Math.max(0, filterY.current - 8), animated: true }), 120); }} /></View> : null}
+    {workspaceId && browseYear !== undefined && !year ? <Pressable onPress={() => setBrowseYear(undefined)} style={styles.browseNote}><Text style={styles.kindText}>Переход к {browseYear} году · показать все годы</Text></Pressable> : null}
+    {filterSheet && workspaceId ? <View style={styles.filterPanel}>
+      {filterOptions.isLoading ? <Busy label="Загружаю фильтры…" /> : filterOptions.error ? <ErrorState message={(filterOptions.error as Error).message} onRetry={() => void filterOptions.refetch()} /> : <>
+        <Text style={styles.label}>Год</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}><Pressable style={[styles.filterChip, !year && styles.kindActive]} onPress={() => { setBrowseYear(undefined); setYear(undefined); setMonth(undefined); setPlace(undefined); }}><Text style={styles.kindText}>Все</Text></Pressable>{filterOptions.data?.years.map((value) => <Pressable key={value} style={[styles.filterChip, year === value && styles.kindActive]} onPress={() => { setBrowseYear(undefined); setYear(value); setMonth(undefined); setPlace(undefined); }}><Text style={styles.kindText}>{value}</Text></Pressable>)}</ScrollView>
+        <Text style={styles.label}>Месяц</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}><Pressable style={[styles.filterChip, !month && styles.kindActive]} onPress={() => { setBrowseYear(undefined); setMonth(undefined); setPlace(undefined); }}><Text style={styles.kindText}>Все</Text></Pressable>{monthOptions.map((value) => <Pressable key={value} style={[styles.filterChip, month === value && styles.kindActive]} onPress={() => { setBrowseYear(undefined); setMonth(value); setPlace(undefined); }}><Text style={styles.kindText}>{new Date(2020, value - 1, 1).toLocaleString('ru-RU', { month: 'long' })}</Text></Pressable>)}</ScrollView>
+        <Text style={styles.label}>Место</Text><ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}><Pressable style={[styles.filterChip, !place && styles.kindActive]} onPress={() => { setBrowseYear(undefined); setPlace(undefined); }}><Text style={styles.kindText}>Все места</Text></Pressable>{filterOptions.data?.places.map((entry) => <Pressable key={entry.key} style={[styles.filterChip, place === entry.key && styles.kindActive]} onPress={() => { setBrowseYear(undefined); setPlace(entry.key); }}><Text style={styles.kindText}>{entry.label}</Text></Pressable>)}{(filterOptions.data?.without_location_count ?? 0) > 0 ? <Pressable style={[styles.filterChip, place === '__none__' && styles.kindActive]} onPress={() => { setBrowseYear(undefined); setPlace('__none__'); }}><Text style={styles.kindText}>Без геолокации ({filterOptions.data?.without_location_count})</Text></Pressable> : null}</ScrollView>
+        <Pressable onPress={() => setExtraFilters(!extraFilters)} style={styles.extraToggle}><Text style={styles.kindText}>{extraFilters ? 'Скрыть' : 'Клиент и услуга'} {extraFilters ? '↑' : '↓'}</Text></Pressable>
+        {extraFilters ? <>
+        <Field label="Клиент визита" value={clientName} onChangeText={(value) => { setBrowseYear(undefined); setClientName(value); }} placeholder="Имя клиента" />
+        <Field label="Услуга визита" value={procedure} onChangeText={(value) => { setBrowseYear(undefined); setProcedure(value); }} placeholder="Например, брови" />
+        </> : null}
+        {year || month || place || clientName || procedure ? <Pressable style={styles.extraToggle} onPress={() => { setBrowseYear(undefined); setYear(undefined); setMonth(undefined); setPlace(undefined); setClientName(''); setProcedure(''); }}><Text style={styles.kindText}>Сбросить фильтры</Text></Pressable> : null}
+
+      </>}
+    </View> : null}
+    {(Platform.OS === 'android' || Platform.OS === 'ios') && workspaceId && !filterSheet && user?.can_upload_media ? <PrimaryButton title="Добавить фото из галереи" icon="images-outline" onPress={() => navigation.navigate('Add', { workspaceId })} /> : null}
+    {(Platform.OS === 'android' || Platform.OS === 'ios') && workspaceId && !filterSheet && user?.can_delete_workspaces ? <PrimaryButton title="Удалить выбранную папку" icon="trash-outline" tone="danger" disabled={busy} onPress={() => {
       const folder = workspaces.data?.find((entry) => entry.id === workspaceId);
       if (!folder) return;
       Alert.alert(`Удалить папку «${folder.display_name}»?`, `Папка и все её файлы (${folder.file_count}) будут удалены. Файлы будут перемещены в корзину сервера.`, [{ text: 'Отмена', style: 'cancel' }, { text: 'Удалить', style: 'destructive', onPress: () => void perform(async () => { await deleteWorkspace(folder.id); setWorkspaceId(''); }, 'Папка и её файлы удалены') }]);
     }} /> : null}
+    <View onLayout={(event) => { resultsY.current = event.nativeEvent.layout.y; }}>
     {media.isLoading ? <Busy label="Загружаю фотографии и видео…" /> : media.error ? <ErrorState message={(media.error as Error).message} onRetry={() => void media.refetch()} /> : visible.length === 0 ? <Empty title="Файлов пока нет" text="Добавьте материалы через центральную кнопку камеры или выберите другую папку." /> : <View style={styles.grid}>
       {visible.map((item) => <Pressable accessibilityRole="button" key={item.id} onPress={() => setSelected(item)} style={styles.tile}>
         <ProtectedImage path={`/media/${item.id}/thumbnail`} style={styles.thumb} />
@@ -99,20 +123,11 @@ export function MediaScreen({ route, navigation }: BottomTabScreenProps<RootTabs
         <View style={styles.tileFooter}><Text numberOfLines={1} style={styles.tileName}>{item.original_name}</Text><Text numberOfLines={1} style={styles.tileMeta}>{item.workspace_name} · {formatBytes(item.size_bytes)}</Text></View>
       </Pressable>)}
     </View>}
+    {media.hasNextPage ? <View style={styles.more}><PrimaryButton title={media.isFetchingNextPage ? 'Загружаю…' : 'Показать ещё'} disabled={media.isFetchingNextPage} onPress={() => void media.fetchNextPage()} /></View> : null}
+    </View>
 
-    <Sheet visible={filterSheet} title="Фильтры архива" onClose={() => setFilterSheet(false)}>
-      {filterOptions.isLoading ? <Busy label="Загружаю фильтры…" /> : filterOptions.error ? <ErrorState message={(filterOptions.error as Error).message} onRetry={() => void filterOptions.refetch()} /> : <>
-        <Text style={styles.label}>Год</Text><View style={styles.folders}><Pressable style={[styles.kind, !year && styles.kindActive]} onPress={() => { setYear(undefined); setMonth(undefined); setPlace(undefined); }}><Text style={styles.kindText}>Все</Text></Pressable>{filterOptions.data?.years.map((value) => <Pressable key={value} style={[styles.kind, year === value && styles.kindActive]} onPress={() => { setYear(value); setMonth(undefined); setPlace(undefined); }}><Text style={styles.kindText}>{value}</Text></Pressable>)}</View>
-        <Text style={styles.label}>Месяц</Text><View style={styles.folders}><Pressable style={[styles.kind, !month && styles.kindActive]} onPress={() => { setMonth(undefined); setPlace(undefined); }}><Text style={styles.kindText}>Все</Text></Pressable>{monthOptions.map((value) => <Pressable key={value} style={[styles.kind, month === value && styles.kindActive]} onPress={() => { setMonth(value); setPlace(undefined); }}><Text style={styles.kindText}>{new Date(2020, value - 1, 1).toLocaleString('ru-RU', { month: 'long' })}</Text></Pressable>)}</View>
-        <Text style={styles.label}>Место</Text><View style={styles.moveList}><Pressable style={[styles.move, !place && styles.moveCurrent]} onPress={() => setPlace(undefined)}><Text style={styles.moveText}>Все места</Text></Pressable>{filterOptions.data?.places.map((entry) => <Pressable key={entry.key} style={[styles.move, place === entry.key && styles.moveCurrent]} onPress={() => setPlace(entry.key)}><Ionicons name="location-outline" size={17} color={colors.gold} /><Text style={styles.moveText}>{entry.label}</Text></Pressable>)}{(filterOptions.data?.without_location_count ?? 0) > 0 ? <Pressable style={[styles.move, place === '__none__' && styles.moveCurrent]} onPress={() => setPlace('__none__')}><Text style={styles.moveText}>Без геолокации ({filterOptions.data?.without_location_count})</Text></Pressable> : null}</View>
-        <Field label="Клиент визита" value={clientName} onChangeText={setClientName} placeholder="Имя клиента" />
-        <Field label="Услуга визита" value={procedure} onChangeText={setProcedure} placeholder="Например, брови" />
-        <PrimaryButton title="Сбросить фильтры" onPress={() => { setYear(undefined); setMonth(undefined); setPlace(undefined); setClientName(''); setProcedure(''); }} />
-        <PrimaryButton title="Показать файлы" onPress={() => setFilterSheet(false)} />
-      </>}
-    </Sheet>
     <Sheet visible={folderSheet} title="Новая папка" onClose={() => setFolderSheet(false)}>
-      <Field label="Название" value={folderName} onChangeText={setFolderName} placeholder="Например: До и после" />
+      <Field label="Название * (не менее 2 символов)" value={folderName} onChangeText={setFolderName} placeholder="Например: До и после" />
       <Text style={styles.label}>Тип папки</Text><View style={styles.kindRow}><Pressable onPress={() => setFolderKind('private')} style={[styles.kind, folderKind === 'private' && styles.kindActive]}><Text style={styles.kindText}>Личная</Text></Pressable><Pressable onPress={() => setFolderKind('studio')} style={[styles.kind, folderKind === 'studio' && styles.kindActive]}><Text style={styles.kindText}>Общая</Text></Pressable></View>
       <PrimaryButton title="Создать папку" icon="folder-open-outline" disabled={busy || folderName.trim().length < 2} onPress={() => void createFolder()} />
     </Sheet>
@@ -163,6 +178,11 @@ const styles = StyleSheet.create({
   videoMark: { position: 'absolute', top: 8, left: 8, width: 30, height: 30, borderRadius: 15, backgroundColor: 'rgba(25,24,24,0.72)', alignItems: 'center', justifyContent: 'center' },
   contentMark: { position: 'absolute', top: 8, right: 8, width: 28, height: 28, borderRadius: 14, backgroundColor: colors.honey, alignItems: 'center', justifyContent: 'center' },
   label: { color: colors.muted, fontSize: 11, fontWeight: '800', margin: 3 }, kindRow: { flexDirection: 'row', gap: 8, marginBottom: 14 }, kind: { flex: 1, padding: 14, backgroundColor: colors.white, borderRadius: 14, borderWidth: 1, borderColor: colors.line, alignItems: 'center' }, kindActive: { backgroundColor: colors.honey, borderColor: colors.gold }, kindText: { color: colors.ink, fontWeight: '800' },
+  browseNote: { alignSelf: 'flex-start', padding: 9, marginBottom: 8, borderRadius: 12, backgroundColor: colors.greenSoft },
+  filterPanel: { backgroundColor: colors.white, borderColor: colors.line, borderWidth: 1, borderRadius: 16, padding: 12, marginVertical: 8 },
+  extraToggle: { alignSelf: 'flex-start', paddingVertical: 7, paddingHorizontal: 4 },
+  filterRow: { flexDirection: 'row', gap: 8, paddingVertical: 7 },
+  filterChip: { minHeight: 42, paddingHorizontal: 14, paddingVertical: 9, backgroundColor: colors.white, borderRadius: 14, borderWidth: 1, borderColor: colors.line, alignItems: 'center', justifyContent: 'center' },
   preview: { width: '100%', aspectRatio: 1, borderRadius: 18, backgroundColor: colors.ink }, details: { color: colors.muted, fontSize: 11, lineHeight: 17, marginVertical: 13 },
   expandPhoto: { position: 'absolute', right: 12, bottom: 12, width: 38, height: 38, borderRadius: 19, backgroundColor: 'rgba(0,0,0,0.65)', alignItems: 'center', justifyContent: 'center' },
   photoViewer: { flex: 1, backgroundColor: '#111111' }, photoHeader: { height: 52, alignItems: 'flex-end', paddingHorizontal: 14 }, closePhoto: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },

@@ -8,7 +8,7 @@
       "policy": "appVersion"
     },
     "updates": {
-      "url": "https://31-10-64-46.sslip.io/api/v1/mobile/updates/manifest",
+      "url": "https://vita29.taild51e5c.ts.net/api/v1/mobile/updates/manifest",
       "checkAutomatically": "ON_LOAD",
       "fallbackToCacheTimeout": 0
     },
@@ -29,8 +29,8 @@
     },
     "android": {
       "package": "ru.violetta.mediacenter",
-      "versionCode": 6,
-      "runtimeVersion": "0.5.0",
+      "versionCode": 7,
+      "runtimeVersion": "0.6.0",
       "googleServicesFile": "./google-services.json",
       "blockedPermissions": [
         "android.permission.SYSTEM_ALERT_WINDOW"

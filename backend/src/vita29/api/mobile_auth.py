@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -14,7 +14,7 @@ from vita29.auth.security import (
     normalize_login,
     verify_password,
 )
-from vita29.auth.throttle import clear_login_failures, login_is_allowed, record_login_failure
+from vita29.auth.throttle import complete_login_success, reserve_login_attempt
 from vita29.db.models import AuditLog, AuthSession, User
 from vita29.api.mobile_push import remove_session_tokens
 from vita29.db.session import get_db
@@ -32,18 +32,18 @@ class MobileSessionResponse(BaseModel):
 @router.post("/login", response_model=MobileSessionResponse)
 def mobile_login(
     payload: LoginRequest,
+    request: Request,
     db: Annotated[Session, Depends(get_db)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> MobileSessionResponse:
     normalized_login = normalize_login(payload.login)
-    if not login_is_allowed(normalized_login):
-        raise HTTPException(status_code=429, detail="Too many login attempts")
+    attempt = reserve_login_attempt(normalized_login, request, settings)
     user = db.scalar(select(User).where(User.login == normalized_login))
     password_hash = user.password_hash if user is not None else DUMMY_PASSWORD_HASH
-    if user is None or not user.is_active or not verify_password(password_hash, payload.password):
-        record_login_failure(normalized_login)
+    password_valid = verify_password(password_hash, payload.password)
+    if user is None or not user.is_active or not password_valid:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-    clear_login_failures(normalized_login)
+    complete_login_success(normalized_login, attempt, settings)
     mobile_session, raw_token = create_session(db, user, settings.mobile_session_lifetime_hours)
     db.add(AuditLog(actor_id=user.id, action="auth.mobile_login", target_type="user", target_id=user.id))
     db.commit()

@@ -9,15 +9,18 @@ from fastapi.staticfiles import StaticFiles
 
 from vita29.api.auth import router as auth_router
 from vita29.api.content import router as content_router
+from vita29.api.availability_schedules import router as availability_schedules_router
 from vita29.api.content_analytics import router as content_analytics_router
 from vita29.api.discussions import router as discussions_router
 from vita29.api.health import router as health_router
 from vita29.api.integrations import router as integrations_router
 from vita29.api.vkid_diagnostic import router as vkid_diagnostic_router
 from vita29.api.telegram_story_login import router as telegram_story_login_router
+from vita29.api.whatsapp_story_login import router as whatsapp_story_login_router
 from vita29.api.max_story_login import router as max_story_login_router
 from vita29.api.media import router as media_router
 from vita29.api.android_import_chunks import router as android_import_chunks_router
+from vita29.api.ios_import_chunks import router as ios_import_chunks_router
 from vita29.api.mobile_auth import router as mobile_auth_router
 from vita29.api.mobile_updates import router as mobile_updates_router
 from vita29.api.mobile_push import router as mobile_push_router
@@ -56,6 +59,16 @@ async def lifespan(_: FastAPI):
                 logging.getLogger(__name__).exception("Scheduled publication worker failed")
             await asyncio.sleep(15)
     task = asyncio.create_task(scheduled_worker())
+    async def availability_worker():
+        from vita29.content.availability_schedule import run_due
+        from vita29.db.session import SessionLocal
+        while True:
+            try:
+                await asyncio.to_thread(run_due, SessionLocal, settings)
+            except Exception:
+                logging.getLogger(__name__).exception("Availability scheduler failed")
+            await asyncio.sleep(60)
+    availability_task = asyncio.create_task(availability_worker())
     async def mobile_push_worker():
         from vita29.discussions.mobile_push import deliver_pending
         from vita29.db.session import SessionLocal
@@ -82,26 +95,38 @@ async def lifespan(_: FastAPI):
     try:
         yield
     finally:
+        availability_task.cancel()
         task.cancel()
         push_task.cancel()
         follower_task.cancel()
         with suppress(asyncio.CancelledError):
             await task
         with suppress(asyncio.CancelledError):
+            await availability_task
+        with suppress(asyncio.CancelledError):
             await push_task
         with suppress(asyncio.CancelledError):
             await follower_task
 
 
-app = FastAPI(title="Vita29 Files", version="0.1.0", lifespan=lifespan)
+_production = get_settings().environment.casefold() == "production"
+app = FastAPI(
+    title="Vita29 Files", version="0.1.0", lifespan=lifespan,
+    docs_url=None if _production else "/docs",
+    redoc_url=None if _production else "/redoc",
+    openapi_url=None if _production else "/openapi.json",
+)
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(android_import_chunks_router, prefix="/api/v1")
+app.include_router(ios_import_chunks_router, prefix="/api/v1")
 app.include_router(integrations_router, prefix="/api/v1")
 app.include_router(vkid_diagnostic_router, prefix="/api/v1")
 app.include_router(telegram_story_login_router, prefix="/api/v1")
+app.include_router(whatsapp_story_login_router, prefix="/api/v1")
 app.include_router(max_story_login_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 app.include_router(content_router, prefix="/api/v1")
+app.include_router(availability_schedules_router, prefix="/api/v1")
 app.include_router(content_analytics_router, prefix="/api/v1")
 app.include_router(discussions_router, prefix="/api/v1")
 app.include_router(users_router, prefix="/api/v1")

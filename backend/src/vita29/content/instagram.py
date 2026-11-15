@@ -5,11 +5,15 @@ only for the duration of the upload/publish transaction.
 """
 
 import json
+import logging
 import time
 from typing import Any
 
 import httpx
+from sqlalchemy import update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
 from vita29.content.public_links import (
     PublicMediaLinkError,
@@ -30,6 +34,33 @@ class InstagramNotPublishedError(InstagramPublishError):
 
 
 _GRAPH_BASE = "https://graph.facebook.com/v22.0"
+log = logging.getLogger(__name__)
+
+
+def _persist_confirmation(db: Session, publication: ContentPublication, external_id: str, *, revoke_links: bool = True) -> None:
+    """Retry only the local receipt, never an already accepted Meta request."""
+    publication_id = publication.id
+    log.info("Instagram confirmed publication %s as %s", publication_id, external_id)
+    for attempt in range(4):
+        # A remote upload can outlive another SQLite writer. Drop its old read
+        # transaction and acquire the write lock before reading any ORM state.
+        db.rollback()
+        try:
+            db.execute(update(ContentPublication).where(ContentPublication.id == publication_id).values(external_id=external_id))
+            if revoke_links:
+                revoke_public_links(db, publication)
+            db.commit()
+            # expire_on_commit=False also leaves previously unloaded attributes
+            # untouched by bulk updates; keep the caller's receipt in sync.
+            set_committed_value(publication, "external_id", external_id)
+            return
+        except OperationalError as error:
+            db.rollback()
+            code = getattr(error.orig, 'sqlite_errorcode', None)
+            locked = isinstance(code, int) and (code & 255) in {5, 6}
+            if not locked or attempt == 3:
+                raise
+            time.sleep(.25 * (attempt + 1))
 
 
 def _call(method: str, path: str, *, token: str, timeout: float, **kwargs: Any) -> dict[str, Any]:
@@ -90,15 +121,16 @@ def publish_to_instagram(
         if len(media_files) > 10:
             raise InstagramPublishError("Instagram принимает не более 10 материалов в одной публикации")
 
+        format_name = publication.publication_format
         delivery_urls = [
             create_temporary_public_link(db, settings, media, publication)
+            + ('?variant=story' if format_name == 'story' and media.media_type == MediaType.IMAGE else '')
             for media in media_files
         ]
         # The unauthenticated delivery endpoint uses a separate request/session,
         # so commit links before Meta starts fetching them.
         db.commit()
 
-        format_name = publication.publication_format
         if format_name == "story" and len(media_files) > 1:
             published_ids = []
             for media, url in zip(media_files, delivery_urls, strict=True):
@@ -115,10 +147,8 @@ def publish_to_instagram(
                     raise InstagramPublishError("Instagram не подтвердил одну из историй")
                 published_ids.append(result_id)
                 # Persist each confirmation so a partial or interrupted send is never retried blindly.
-                publication.external_id = json.dumps(published_ids)
-                db.commit()
-            revoke_public_links(db, publication)
-            db.commit()
+                _persist_confirmation(db, publication, json.dumps(published_ids), revoke_links=False)
+            _persist_confirmation(db, publication, json.dumps(published_ids))
             return json.dumps(published_ids)
         if len(media_files) == 1:
             media = media_files[0]
@@ -171,8 +201,7 @@ def publish_to_instagram(
         result_id = str(published.get("id") or "")
         if not result_id:
             raise InstagramPublishError("Instagram не подтвердил публикацию")
-        revoke_public_links(db, publication)
-        db.commit()
+        _persist_confirmation(db, publication, result_id)
         return result_id
     except (IntegrationConfigurationError, PublicMediaLinkError) as error:
         revoke_public_links(db, publication)

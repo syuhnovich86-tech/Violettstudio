@@ -76,6 +76,8 @@ class ContentFormat(str, enum.Enum):
 
 class PublicationPlatform(str, enum.Enum):
     TELEGRAM = "telegram"
+    TELEGRAM_STUDIO = "telegram_studio"
+    WHATSAPP_STUDIO = "whatsapp_studio"
     MAX = "max"
     INSTAGRAM = "instagram"
     VK = "vk"
@@ -231,7 +233,7 @@ class MediaFile(Base):
     yclients_record_id: Mapped[int | None] = mapped_column(
         ForeignKey("yclients_visits.record_id", ondelete="SET NULL"), nullable=True, index=True
     )
-    publication_allowed: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    publication_allowed: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
     # A deliberate editorial marker.  It is independent of a temporary UI
     # selection and lets the content planner prioritise approved source files.
     content_marked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
@@ -456,11 +458,34 @@ class MobilePushDelivery(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class AvailabilityPublicationSchedule(Base):
+    __tablename__ = "availability_publication_schedule"
+
+    staff_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    owner_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="RESTRICT"))
+    enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    frequency: Mapped[str] = mapped_column(String(8), default="daily")
+    weekdays_json: Mapped[str] = mapped_column(Text, default="[]")
+    time_local: Mapped[str] = mapped_column(String(5), default="10:00")
+    publish_new: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    targets_json: Mapped[str] = mapped_column(Text, default="{}")
+    seen_slots_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_regular_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_item_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    busy: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, onupdate=utc_now)
+
+
 class ContentItem(Base):
     __tablename__ = "content_item"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     title: Mapped[str] = mapped_column(String(180))
+    # Removing a card from the plan must not erase confirmed/uncertain deliveries.
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     caption: Mapped[str | None] = mapped_column(Text, nullable=True)
     editor_instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
     # This is deliberately separate from the editor note.  An instruction

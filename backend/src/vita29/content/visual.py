@@ -25,6 +25,7 @@ from vita29.content.agent import (
     openai_ipv4_client,
     read_openai_secret,
 )
+from vita29.content.text import normalize_pm
 from vita29.db.models import ContentItem, MediaFile, MediaType, Workspace, WorkspaceKind
 from vita29.integrations.store import config_value
 from vita29.media.storage import create_thumbnail, original_path
@@ -314,7 +315,7 @@ def _display_title(title: str) -> str:
         title,
         flags=re.IGNORECASE,
     )
-    return cleaned.strip() or title.strip()
+    return normalize_pm(cleaned.strip() or title.strip())
 
 
 def _capitalize_first_letter(value: str) -> str:
@@ -388,7 +389,7 @@ def _normalize_campaign_text(value: str) -> str:
     )
     cleaned = re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
-    return _capitalize_first_letter(cleaned)
+    return normalize_pm(_capitalize_first_letter(cleaned))
 
 
 def _wrap_text(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, width: int) -> list[str]:
@@ -486,10 +487,15 @@ def _campaign_copy(
 
     def explicit_copy(value: str) -> str | None:
         found = marker.search(value)
+        if not found:
+            # Dictation often omits the colon: "напиши запись на ...".
+            # Stop at the line boundary so later system instructions do not
+            # become part of the printed message.
+            found = re.search(r"\bнапиши\s+([^\n]+)", value, flags=re.IGNORECASE)
         # Preserve punctuation and requested wording exactly. Only whitespace
         # is folded because the renderer cannot use a literal line break as a
         # separate label. The 520-character limit protects the image layout.
-        return " ".join(found.group(1).split())[:520] if found else None
+        return normalize_pm(" ".join(found.group(1).split())[:520]) if found else None
 
     copy = explicit_copy(history[0]) if history else None
     has_exact_copy = copy is not None
@@ -703,12 +709,15 @@ def _draw_light_editorial_copy(
     copy_hint: str | None = None,
 ) -> None:
     """Typeset a restrained light editorial block for the ivory brand family."""
-    copy, _ = _campaign_copy(title, instruction, copy_hint)
+    copy, exact = _campaign_copy(title, instruction, copy_hint)
     if not copy:
         return
     # The copy is intentionally laid out by the application: Russian remains
     # correct and editors get exactly the phrase they asked for, not AI text.
     display = copy if exact else _capitalize_first_letter(copy)
+    master = re.search(r"топ[\s-]+мастер(?:а)?\s+([А-ЯЁ][а-яё]+)", instruction or "")
+    if master:
+        display = f"Топ-мастер {master.group(1)} · {display}"
     font, lines, size = _fit_wrapped_text(
         draw, display, 790, preferred_size=50, minimum_size=27, max_lines=5, serif=True
     )
@@ -882,8 +891,8 @@ def _native_visual_prompt(title: str, instruction: str, *, has_source: bool, for
     client's procedure result. The model output always remains reviewable;
     exact spelling, source identity and edits still need human verification.
     """
-    editor_note = (instruction or '').strip()[:3000]
-    topic = (title or '').strip()[:300]
+    editor_note = normalize_pm((instruction or '').strip()[:3000])
+    topic = normalize_pm((title or '').strip()[:300])
     if has_source and force_edit:
         return (
             'Edit the supplied photograph according to the user request. Preserve the same person, '
@@ -891,6 +900,7 @@ def _native_visual_prompt(title: str, instruction: str, *, has_source: bool, for
             'Change only the explicitly requested objects, colours, retouching, text or layout; do not introduce '
             'a different face, new treatment, frame, logo, caption, or banner unless specifically requested. '
             'For colour changes keep texture, shadows and object shape natural. Keep the original photo recognisable. '
+            'Write the Russian abbreviation for permanent makeup as exactly «ПМ», with both letters uppercase. '
             f'User title: {topic}\nExact editor request: {editor_note}'
         )
     family = ('warm ivory, champagne and subtle taupe, clean premium editorial design' if style == 'light'
@@ -908,6 +918,7 @@ def _native_visual_prompt(title: str, instruction: str, *, has_source: bool, for
         'not an empty template. Compose text and imagery together with clear hierarchy, generous margins and no clipping. '
         'Use tasteful serif and clean supporting type appropriate to the design. Avoid clutter and generic decorative lettering. '
         'Use VIOLETTA as a restrained wordmark; do not invent a detailed logo or inaccurate prices. '
+        'Write the Russian abbreviation for permanent makeup as exactly «ПМ», with both letters uppercase; never «Пм» or «пм». '
         f'{source_rule}{typography}'
         f'Topic: {topic}\nEditor instructions: {editor_note}\n'
         'Respect the editor instructions while preserving all stated facts. Do not add unrequested claims or prices.'
@@ -952,7 +963,7 @@ def generate_branded_visual(
     image_sources = [entry for entry in source_media if entry.media_type == MediaType.IMAGE][:16]
     native_visuals = config_value(settings, 'openai_native_visuals', 'true').casefold() != 'false'
     collage_requested = _wants_collage(item.title, instruction)
-    before_after = bool(re.search(r'до\s*(?:и|/|—|-)\s*после', f'{item.title}\n{instruction}'.casefold()))
+    before_after = bool(re.search(r'до\s*(?:(?:и|/|—|-)\s*)?после', f'{item.title}\n{instruction}'.casefold()))
     # The order selected in the archive is meaningful: for two photos it is
     # "before" then "after". Render this locally so the client result is never
     # invented or mixed by an image model.

@@ -77,6 +77,7 @@ def sync_yclients_visits(
             end_date=end_date.isoformat(),
             page=page,
             count=page_size,
+            with_deleted=True,
         )
         page_client_ids = list({
             int(client_data["id"])

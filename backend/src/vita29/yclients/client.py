@@ -89,6 +89,7 @@ class YclientsClient:
         end_date: str,
         page: int = 1,
         count: int = 100,
+        with_deleted: bool = False,
     ) -> list[dict[str, Any]]:
         try:
             response = httpx.get(
@@ -99,6 +100,7 @@ class YclientsClient:
                     "end_date": end_date,
                     "page": page,
                     "count": count,
+                    **({"with_deleted": 1} if with_deleted else {}),
                 },
                 timeout=self.settings.yclients_http_timeout_seconds,
             )
@@ -111,7 +113,7 @@ class YclientsClient:
             raise YclientsError("YCLIENTS returned invalid records data")
         return data
 
-    def list_book_times(self, salon_id: int, staff_id: int, day: str) -> list[str]:
+    def list_book_times(self, salon_id: int, staff_id: int, day: str, *, minimum_minutes: int = 60) -> list[str]:
         """Return only times explicitly offered by YCLIENTS online booking.
 
         This is intentionally not inferred from an empty interval in the local cache:
@@ -148,7 +150,7 @@ class YclientsClient:
                 duration_seconds = int(duration)
             except (TypeError, ValueError):
                 continue
-            if duration_seconds < 60 * 60:
+            if duration_seconds < minimum_minutes * 60:
                 continue
             candidate = value.get("time")
             if isinstance(candidate, str) and candidate.strip():

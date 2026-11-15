@@ -29,7 +29,7 @@ export function AddScreen({ route, navigation }: BottomTabScreenProps<RootTabs, 
   const [visit, setVisit] = useState<Visit | null>(null);
   const [visitSheet, setVisitSheet] = useState(false);
   const [batchComment, setBatchComment] = useState('');
-  const [publicationAllowed, setPublicationAllowed] = useState(false);
+  const [publicationAllowed, setPublicationAllowed] = useState(true);
   const [uploading, setUploading] = useState(false);
   const focused = useIsFocused();
   const workspaces = useQuery({ queryKey: ['workspaces'], queryFn: listWorkspaces, refetchInterval: focused ? 30_000 : false });

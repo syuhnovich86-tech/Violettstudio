@@ -137,6 +137,22 @@ def test_prepare_returns_generated_text_and_image(client: TestClient, tmp_path, 
     assert calls == ["Готовый текст"]
 
 
+def test_before_after_without_conjunction_preserves_original_photos(monkeypatch):
+    from vita29.content import visual
+    photos = [SimpleNamespace(media_type=MediaType.IMAGE), SimpleNamespace(media_type=MediaType.IMAGE)]
+    item = SimpleNamespace(title='Перманент', visual_style='auto')
+    monkeypatch.setattr(visual, 'config_value', lambda *args: 'true')
+    monkeypatch.setattr(visual, '_before_after_collage', lambda sources, *args, **kwargs: b'collage-from-originals' if sources == photos else None)
+    monkeypatch.setattr(visual, '_save_generated_image', lambda db, settings, item, actor_id, instruction, image: image)
+    monkeypatch.setattr(visual, 'read_openai_secret', lambda *args: (_ for _ in ()).throw(AssertionError('before/after must not be redrawn')))
+    assert visual.generate_branded_visual(None, None, item, 'editor', 'Сделай коллаж Бровки до после на белом фоне', photos) == b'collage-from-originals'
+
+
+def test_dictated_banner_copy_without_colon_stops_at_next_line():
+    instruction = 'работу топ мастера Светлана, напиши запись на перманентный макияж любой зоны\nСоздать фирменное изображение для публикации.'
+    assert _campaign_copy('Перманент', instruction) == ('запись на перманентный макияж любой зоны', True)
+
+
 def test_selected_source_can_explicitly_request_ai_image_edit(client: TestClient, tmp_path, monkeypatch) -> None:
     """A retouch request is explicit, even without the word "generate"."""
     seed_user(tmp_path / "test.db", role=UserRole.OWNER)
@@ -201,6 +217,70 @@ def test_instagram_delivery_link_is_public_only_while_it_is_not_revoked(client: 
         revoke_public_links(db, publication)
         db.commit()
         assert client.get(token_path).status_code == 404
+
+
+def test_instagram_story_delivery_preserves_source_proportions(client, tmp_path):
+    user = seed_user(tmp_path / 'test.db', role=UserRole.OWNER)
+    engine = create_database_engine(f"sqlite:///{tmp_path / 'test.db'}")
+    settings = Settings(media_root=tmp_path / 'media')
+    source = settings.originals_path / 'generated' / 'story.jpg'
+    source.parent.mkdir(parents=True, exist_ok=True)
+    image = Image.new('RGB', (400, 600), 'red')
+    for x in range(100, 300):
+        for y in range(100, 500): image.putpixel((x, y), (0, 0, 255))
+    image.save(source, 'JPEG', quality=100)
+    with Session(engine, expire_on_commit=False) as db:
+        workspace = Workspace(display_name='Контент', kind=WorkspaceKind.STUDIO, owner_id=user.id)
+        db.add(workspace); db.flush()
+        media = MediaFile(owner_id=user.id, workspace_id=workspace.id, storage_key='generated/story.jpg', original_name='story.jpg', media_type=MediaType.IMAGE, mime_type='image/jpeg', size_bytes=source.stat().st_size, checksum_sha256='0' * 64, publication_allowed=True)
+        db.add(media); db.flush()
+        url = create_temporary_public_link(db, settings, media)
+        db.commit()
+        token_path = url.split('https://31-10-64-46.sslip.io', 1)[1]
+        response = client.get(token_path + '?variant=story')
+        assert response.status_code == 200
+        rendered = Image.open(io.BytesIO(response.content))
+        assert rendered.size == (1080, 1920)
+        # The blue rectangle has a 1:2 aspect ratio; it must not be stretched.
+        blue = lambda x, y: rendered.getpixel((x, y))[2] > 180 and rendered.getpixel((x, y))[0] < 50
+        assert blue(540, 960) and blue(540, 430) and blue(540, 1490)
+        assert not blue(200, 960) and not blue(880, 960)
+
+
+def test_instagram_uses_story_variant_only_for_story_images(monkeypatch):
+    from vita29.content import instagram
+    seen = []
+    monkeypatch.setattr(instagram, 'read_secret', lambda *args: 'test-token')
+    monkeypatch.setattr(instagram, 'config_value', lambda *args: 'test-account')
+    monkeypatch.setattr(instagram, 'create_temporary_public_link', lambda *args: 'https://example.test/media/token')
+    monkeypatch.setattr(instagram, 'revoke_public_links', lambda *args: None)
+    monkeypatch.setattr(instagram, '_wait_until_ready', lambda *args, **kwargs: None)
+    def call(method, path, **kwargs):
+        if path.endswith('/media'):
+            seen.append(kwargs['data']['image_url'])
+            return {'id': 'container'}
+        return {'id': 'published'}
+    monkeypatch.setattr(instagram, '_call', call)
+    db = SimpleNamespace(commit=lambda: None)
+    settings = SimpleNamespace(integration_secrets_path=__import__('pathlib').Path('/tmp'), openai_http_timeout_seconds=10)
+    media = SimpleNamespace(media_type=MediaType.IMAGE)
+    for format_name in ('story', 'post'):
+        publication = SimpleNamespace(publication_format=format_name)
+        assert instagram.publish_to_instagram(db, settings, publication, 'caption', [media]) == 'published'
+    assert seen == ['https://example.test/media/token?variant=story', 'https://example.test/media/token']
+
+
+def test_pm_abbreviation_is_capitalized_in_generated_content(client, tmp_path):
+    from vita29.content.text import normalize_pm
+    from vita29.content.visual import _native_visual_prompt
+    assert normalize_pm('Пм, пм и ПМ; подпмех') == 'ПМ, ПМ и ПМ; подпмех'
+    assert _campaign_copy('Пм', 'Напиши: запись на пм') == ('запись на ПМ', True)
+    prompt = _native_visual_prompt('Пм', 'запись на пм', has_source=False, force_edit=False, style='dark')
+    assert 'Topic: ПМ' in prompt and 'Editor instructions: запись на ПМ' in prompt
+    seed_user(tmp_path / 'test.db', role=UserRole.OWNER)
+    csrf = login(client)
+    response = client.post('/api/v1/content/items', headers={'X-CSRF-Token': csrf}, json={'title':'Пм', 'scheduled_at':'2030-11-03T10:00:00+03:00', 'platforms':['telegram']})
+    assert response.status_code == 201 and response.json()['title'] == 'ПМ'
 
 
 def test_visual_uses_explicit_editor_labels_verbatim_without_inventing_copy() -> None:

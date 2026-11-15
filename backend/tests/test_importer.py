@@ -65,6 +65,7 @@ def test_iphone_importer_registers_original_and_quarantines_duplicate(tmp_path: 
         media = db.scalar(select(MediaFile))
         assert media is not None
         assert media.original_name == "IMG_0001.JPG"
+        assert media.publication_allowed is True
         assert media.captured_at is not None
         assert (settings.originals_path / media.storage_key).is_file()
 

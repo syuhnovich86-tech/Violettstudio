@@ -8,7 +8,7 @@
       "developmentClient": true,
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://31-10-64-46.sslip.io/api/v1"
+        "EXPO_PUBLIC_API_URL": "https://vita29.taild51e5c.ts.net/api/v1"
       }
     },
     "preview": {
@@ -18,13 +18,13 @@
         "buildType": "apk"
       },
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://31-10-64-46.sslip.io/api/v1"
+        "EXPO_PUBLIC_API_URL": "https://vita29.taild51e5c.ts.net/api/v1"
       }
     },
     "production": {
       "autoIncrement": true,
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://31-10-64-46.sslip.io/api/v1"
+        "EXPO_PUBLIC_API_URL": "https://vita29.taild51e5c.ts.net/api/v1"
       }
     }
   },

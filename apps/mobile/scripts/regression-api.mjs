@@ -82,9 +82,9 @@ try {
   const contentList = await request(`/content/items?week_start=${monday(scheduled)}`);
   assert(contentList.some((item) => item.id === contentId), 'content item missing from week');
   await request(`/content/items/${contentId}`, { method: 'PATCH', body: JSON.stringify({ status: 'review', caption: 'Обновлено из Android regression' }) });
-  const library = await request('/content/media-library?limit=100&offset=0');
-  assert(library.items.some((item) => item.id === mediaId), 'content media library does not contain marked media');
-  ok('content plan create, update and media library');
+  const library = await request('/content/media-library?limit=100&offset=0&sort=uploaded');
+  assert(library.items[0]?.id === mediaId, 'newly uploaded media is not first in the content library');
+  ok('content plan create, update and upload-date media ordering');
 
   const users = await request('/users');
   let regressionUser = users.find((item) => item.login === 'android-regression');

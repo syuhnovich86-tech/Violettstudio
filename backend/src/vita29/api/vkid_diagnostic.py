@@ -22,15 +22,16 @@ _headers = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer",
 
 
 @router.get("/start")
-def start(user: Annotated[User, Depends(require_owner_or_administrator)]):
+def start(user: Annotated[User, Depends(require_owner_or_administrator)], purpose: str = Query(default="analytics", pattern="^(analytics|publication)$")):
     now = time.monotonic()
     for key in list(_attempts):
         if _attempts[key]["expires"] < now:
             del _attempts[key]
     if len(_attempts) >= 100:
         raise HTTPException(429, "Слишком много попыток. Повторите позже.")
-    url, state, verifier = new_authorization(CLIENT, CALLBACK)
-    _attempts[state] = {"user_id": user.id, "verifier": verifier, "expires": now + 600}
+    scope = "photos wall groups" if purpose == "publication" else "stats groups"
+    url, state, verifier = new_authorization(CLIENT, CALLBACK, scope)
+    _attempts[state] = {"user_id": user.id, "verifier": verifier, "expires": now + 600, "purpose": purpose}
     return RedirectResponse(url, headers=_headers)
 
 
@@ -44,6 +45,24 @@ async def _check_stats(client, token, group):
         })
         data = response.json()
         if isinstance(data.get("response"), list):
+            return "доступна"
+        error = data.get("error", {})
+        code = error.get("error_code")
+        subcode = error.get("error_subcode")
+        return f"ошибка VK {code if isinstance(code, int) else 'неизвестна'}" + (f" / {subcode}" if isinstance(subcode, int) else "")
+    except (ValueError, httpx.HTTPError):
+        return "ответ VK недоступен"
+
+
+async def _check_wall_photo(client, token, group):
+    if not group.isdecimal():
+        return "ID сообщества не настроен"
+    try:
+        response = await client.post("https://api.vk.com/method/photos.getWallUploadServer", data={
+            "group_id": group, "v": "5.199", "access_token": token,
+        })
+        data = response.json()
+        if isinstance(data.get("response"), dict) and data["response"].get("upload_url"):
             return "доступна"
         error = data.get("error", {})
         code = error.get("error_code")
@@ -70,12 +89,14 @@ async def callback(user: Annotated[User, Depends(require_owner_or_administrator)
         async with httpx.AsyncClient(timeout=20) as client:
             first = await token_request(client, client_id=CLIENT, redirect_uri=CALLBACK,
                 device_id=device_id, state=state, code=code, verifier=attempt["verifier"])
-            before = await _check_stats(client, first["access_token"], group)
+            check = _check_wall_photo if attempt.get("purpose") == "publication" else _check_stats
+            before = await check(client, first["access_token"], group)
             second = await token_request(client, client_id=CLIENT, redirect_uri=CALLBACK,
                 device_id=device_id, state=state, refresh_token=first["refresh_token"])
-            after = await _check_stats(client, second["access_token"], group)
+            after = await check(client, second["access_token"], group)
     except (VKIDError, ValueError):
         return HTMLResponse("Не удалось получить или обновить токен VK ID. Действующие ключи не изменены.", headers=_headers)
+    label = "Загрузка фото на стену" if attempt.get("purpose") == "publication" else "Статистика"
     return HTMLResponse(f"<h2>Проверка VK ID</h2><p>Обновление токена: успешно.</p>"
-        f"<p>Статистика до обновления: {before}.</p><p>Статистика после обновления: {after}.</p>"
+        f"<p>{label} до обновления: {before}.</p><p>{label} после обновления: {after}.</p>"
         "<p>Проверка завершена, токены не сохранены. Ключ публикаций не изменён.</p>", headers=_headers)

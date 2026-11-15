@@ -15,6 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
 from vita29.api.media import _scoped_android_import_key, get_accessible_workspace, media_response, upload_media
+from vita29.api.import_state import read_state, sync_directory, write_state
 from vita29.auth.dependencies import get_current_user, require_csrf
 from vita29.db.models import AuthSession, MediaFile, User
 from vita29.db.session import get_db
@@ -72,16 +73,8 @@ def read_progress(db: Session, settings: Settings, key: str, workspace_id: str, 
     with locked(lock):
         if completed(db, key, workspace_id, marker):
             return {'exists': True, 'offset': total}
-        if meta.exists():
-            try:
-                info = json.loads(meta.read_text(encoding='utf-8'))
-                if info['total'] != total:
-                    raise HTTPException(status_code=409, detail='Размер исходного файла изменился')
-            except (OSError, ValueError, KeyError, TypeError) as error:
-                raise HTTPException(status_code=409, detail='Повреждено состояние передачи') from error
+        read_state(part, meta, total)
         size = part.stat().st_size if part.exists() else 0
-        if size > total:
-            raise HTTPException(status_code=409, detail='Повреждено состояние передачи')
         return {'exists': False, 'offset': size}
 
 
@@ -99,18 +92,9 @@ def append_chunk(request: Request, user: User, db: Session, settings: Settings, 
         authorized_key(request, user, db, settings, workspace_id)
         if completed(db, key, workspace_id, marker):
             return {'exists': True, 'offset': total}
-        if meta.exists():
-            try:
-                info = json.loads(meta.read_text(encoding='utf-8'))
-                if info['total'] != total:
-                    raise HTTPException(status_code=409, detail='Размер исходного файла изменился')
-            except (OSError, ValueError, KeyError, TypeError) as error:
-                raise HTTPException(status_code=409, detail='Повреждено состояние передачи') from error
-        else:
-            name = unquote(request.headers.get('x-android-filename', 'iphone-original'))[:255]
-            temporary = meta.with_suffix('.json.tmp')
-            temporary.write_text(json.dumps({'total': total, 'filename': name}, ensure_ascii=False), encoding='utf-8')
-            os.replace(temporary, meta)
+        if read_state(part, meta, total) is None:
+            name = unquote(request.headers.get('x-android-filename', 'android-original'))[:255]
+            write_state(meta, {'total': total, 'filename': name or 'original'})
         current = part.stat().st_size if part.exists() else 0
         if current != offset:
             raise HTTPException(status_code=409, detail=f'Смещение изменилось: {current}')
@@ -122,6 +106,8 @@ def append_chunk(request: Request, user: User, db: Session, settings: Settings, 
             output.write(data)
             output.flush()
             os.fsync(output.fileno())
+        if current == 0:
+            sync_directory(part.parent)
         return {'exists': False, 'offset': current + len(data)}
 
 
@@ -146,20 +132,13 @@ def complete(request: Request, auth: Annotated[AuthSession, Depends(require_csrf
         previous = completed(db, key, workspace_id, marker)
         if previous:
             return {'exists': True, 'media_id': previous.id}
-        if not part.exists() or not meta.exists() or part.stat().st_size != total:
+        info = read_state(part, meta, total)
+        if info is None or not part.exists() or part.stat().st_size != total:
             raise HTTPException(status_code=409, detail='Передача файла ещё не завершена')
-        try:
-            info = json.loads(meta.read_text(encoding='utf-8'))
-            if info['total'] != total:
-                raise HTTPException(status_code=409, detail='Размер исходного файла изменился')
-            filename = info['filename']
-        except (OSError, ValueError, KeyError, TypeError) as error:
-            raise HTTPException(status_code=409, detail='Повреждено состояние передачи') from error
+        filename = info['filename']
         with part.open('rb') as source:
-            result = upload_media(request, auth, user, db, settings.model_copy(update={'max_file_bytes': MAX_FILE}), UploadFile(file=source, filename=filename), workspace_id, False, None, None)
-        temporary = marker.with_suffix('.done.tmp')
-        temporary.write_text(json.dumps({'media_id': result.id}), encoding='utf-8')
-        os.replace(temporary, marker)
+            result = upload_media(request, auth, user, db, settings.model_copy(update={'max_file_bytes': MAX_FILE}), UploadFile(file=source, filename=filename), workspace_id, True, None, None)
+        write_state(marker, {'media_id': result.id})
         part.unlink(missing_ok=True)
         meta.unlink(missing_ok=True)
         return {'exists': True, 'media_id': result.id}

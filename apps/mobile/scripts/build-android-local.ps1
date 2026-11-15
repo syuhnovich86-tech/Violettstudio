@@ -9,19 +9,32 @@ param(
 $ErrorActionPreference = 'Stop'
 $mobileRoot = Split-Path -Parent $PSScriptRoot
 $appVersion = (Get-Content -LiteralPath (Join-Path $mobileRoot 'package.json') -Raw | ConvertFrom-Json).version
-$androidBuild = (Get-Content -LiteralPath (Join-Path $mobileRoot 'app.json') -Raw | ConvertFrom-Json).expo.android.versionCode
+$appConfiguration = (Get-Content -LiteralPath (Join-Path $mobileRoot 'app.json') -Raw | ConvertFrom-Json).expo
+$androidBuild = $appConfiguration.android.versionCode
 $env:VIOLETTA_ALLOW_CLEARTEXT = if ($env:EXPO_PUBLIC_API_URL -match '^http://') { 'true' } else { 'false' }
 $workspaceRoot = Split-Path -Parent (Split-Path -Parent $mobileRoot)
-$toolsRoot = Join-Path $workspaceRoot '.tools'
-$jdkRoot = Get-ChildItem -LiteralPath (Join-Path $toolsRoot 'jdk17') -Directory |
-    Select-Object -First 1 -ExpandProperty FullName
-$androidSdk = Join-Path $toolsRoot 'android-sdk'
-
-if (-not $jdkRoot -or -not (Test-Path -LiteralPath (Join-Path $jdkRoot 'bin\java.exe'))) {
-    throw 'Portable JDK 17 was not found under .tools\jdk17.'
+$toolAncestor = Get-Item -LiteralPath $mobileRoot
+$jdkRoot = $null
+$androidSdk = $null
+while ($null -ne $toolAncestor) {
+    $candidateTools = Join-Path $toolAncestor.FullName '.tools'
+    $candidateJdkParent = Join-Path $candidateTools 'jdk17'
+    $candidateSdk = Join-Path $candidateTools 'android-sdk'
+    if ((Test-Path -LiteralPath $candidateJdkParent -PathType Container) -and
+        (Test-Path -LiteralPath $candidateSdk -PathType Container)) {
+        $candidateJdk = Get-ChildItem -LiteralPath $candidateJdkParent -Directory |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'bin\java.exe') } |
+            Select-Object -First 1 -ExpandProperty FullName
+        if ($candidateJdk) {
+            $jdkRoot = $candidateJdk
+            $androidSdk = $candidateSdk
+            break
+        }
+    }
+    $toolAncestor = $toolAncestor.Parent
 }
-if (-not (Test-Path -LiteralPath $androidSdk)) {
-    throw 'Portable Android SDK was not found under .tools\android-sdk.'
+if (-not $jdkRoot -or -not $androidSdk) {
+    throw 'No ancestor .tools directory contains both a portable JDK 17 and Android SDK.'
 }
 
 $asciiToolsRoot = 'C:\cb'
@@ -43,11 +56,12 @@ if (-not (Test-Path -LiteralPath (Join-Path $asciiCmake 'bin\cmake.exe'))) {
     Copy-Item -LiteralPath $cmakeSource -Destination $asciiCmakeParent -Recurse -Force
 }
 
-$stageRoot = @('C:\v', 'C:\w', 'C:\x', 'C:\y', 'C:\z', 'C:\v1', 'C:\v2', 'C:\v3', 'C:\v4', 'C:\v5', 'C:\v6', 'C:\v7', 'C:\v8', 'C:\v9', 'C:\v10') |
+$stageCandidates = @('C:\v', 'C:\w', 'C:\x', 'C:\y', 'C:\z') + @(1..99 | ForEach-Object { "C:\v$_" })
+$stageRoot = $stageCandidates |
     Where-Object { -not (Test-Path -LiteralPath $_) } |
     Select-Object -First 1
 if (-not $stageRoot) {
-    throw 'No free short staging directory (C:\v through C:\v4).'
+    throw 'No free short staging directory (C:\v, C:\w through C:\z, or C:\v1 through C:\v99).'
 }
 $stageMobile = $stageRoot
 New-Item -ItemType Directory -Path $stageMobile -Force | Out-Null
@@ -57,6 +71,8 @@ $files = @(
     '.npmrc',
     '.env.example',
     'app.json',
+    'app.config.js',
+    'app.config.ts',
     'App.tsx',
     'eas.json',
     'google-services.json',
@@ -78,6 +94,38 @@ foreach ($file in $files) {
     }
 }
 
+$googleServicesRelative = $appConfiguration.android.googleServicesFile
+if ($googleServicesRelative) {
+    if ([System.IO.Path]::IsPathRooted($googleServicesRelative)) {
+        throw 'android.googleServicesFile must be a relative path inside the mobile project.'
+    }
+    $googleServicesTarget = [System.IO.Path]::GetFullPath((Join-Path $stageMobile $googleServicesRelative))
+    $stagePrefix = [System.IO.Path]::GetFullPath($stageMobile).TrimEnd('\') + '\'
+    if (-not $googleServicesTarget.StartsWith($stagePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw 'android.googleServicesFile must stay inside the build staging directory.'
+    }
+    $googleServicesSource = Join-Path $mobileRoot $googleServicesRelative
+    if (-not (Test-Path -LiteralPath $googleServicesSource -PathType Leaf)) {
+        $googleServicesSource = $null
+        $configAncestor = Get-Item -LiteralPath $mobileRoot
+        while ($null -ne $configAncestor) {
+            $candidateConfig = Join-Path $configAncestor.FullName 'apps\mobile\google-services.json'
+            if (Test-Path -LiteralPath $candidateConfig -PathType Leaf) {
+                $googleServicesSource = $candidateConfig
+                break
+            }
+            $configAncestor = $configAncestor.Parent
+        }
+    }
+    if ($googleServicesSource) {
+        New-Item -ItemType Directory -Path (Split-Path -Parent $googleServicesTarget) -Force | Out-Null
+        Copy-Item -LiteralPath $googleServicesSource -Destination $googleServicesTarget -Force
+    }
+    elseif ($Configuration -eq 'Release') {
+        throw "Android release requires '$googleServicesRelative'; no project file or ancestor apps\mobile\google-services.json was found."
+    }
+}
+
 Push-Location $stageMobile
 try {
     # A hoisted layout keeps CMake object paths below Windows' 260-character limit.
@@ -87,14 +135,45 @@ try {
     & pnpm exec expo prebuild --platform android --no-install
     if ($LASTEXITCODE -ne 0) { throw 'Expo Android prebuild failed.' }
 
+    if ($Configuration -eq 'Release' -and $env:VIOLETTA_ALLOW_CLEARTEXT -ne 'true') {
+        $expectedUpdateUrl = 'https://31-10-64-46.sslip.io/api/v1/mobile/updates/manifest'
+        $expectedRuntime = $appConfiguration.android.runtimeVersion
+        if ($expectedRuntime -isnot [string] -or -not $expectedRuntime) {
+            throw 'Production Android requires an explicit runtimeVersion string in app.json.'
+        }
+        [xml]$nativeManifest = Get-Content -LiteralPath 'android\app\src\main\AndroidManifest.xml' -Raw
+        $androidNamespace = 'http://schemas.android.com/apk/res/android'
+        $updateMetadata = @{}
+        foreach ($entry in $nativeManifest.manifest.application.'meta-data') {
+            $updateMetadata[$entry.GetAttribute('name', $androidNamespace)] = $entry.GetAttribute('value', $androidNamespace)
+        }
+        if ($updateMetadata['expo.modules.updates.EXPO_UPDATE_URL'] -ne $expectedUpdateUrl) {
+            throw "Production Android native update URL must be $expectedUpdateUrl. Check Expo config plugins."
+        }
+        if ($updateMetadata['expo.modules.updates.ENABLED'] -ne 'true' -or
+            $updateMetadata['expo.modules.updates.EXPO_UPDATES_CHECK_ON_LAUNCH'] -ne 'ALWAYS') {
+            throw 'Production Android native Expo updates must be enabled and checked on launch.'
+        }
+        $nativeRuntime = $updateMetadata['expo.modules.updates.EXPO_RUNTIME_VERSION']
+        if ($nativeRuntime -like '@string/*') {
+            [xml]$nativeStrings = Get-Content -LiteralPath 'android\app\src\main\res\values\strings.xml' -Raw
+            $runtimeResource = $nativeRuntime.Substring('@string/'.Length)
+            $runtimeEntry = $nativeStrings.resources.string | Where-Object { $_.name -eq $runtimeResource }
+            $nativeRuntime = $runtimeEntry.InnerText
+        }
+        if ($nativeRuntime -ne $expectedRuntime) {
+            throw "Production Android native runtime '$nativeRuntime' does not match app.json runtime '$expectedRuntime'."
+        }
+    }
+
     # React Native codegen creates object paths longer than Windows' legacy
     # 260-character limit even when the project itself is staged at C:\x.
     # Put only the app CMake worktree at a deterministic drive-root path.
     $cmakeCandidates = if ($Architecture -eq 'x86_64') {
-        @('C:\cx', 'C:\cx1', 'C:\cx2', 'C:\cx3', 'C:\cx4', 'C:\cx5')
+        @('C:\cx') + @(1..99 | ForEach-Object { "C:\cx$_" })
     }
     else {
-        @('C:\ca', 'C:\ca1', 'C:\ca2', 'C:\ca3', 'C:\ca4', 'C:\ca5')
+        @('C:\ca') + @(1..99 | ForEach-Object { "C:\ca$_" })
     }
     $cmakeBuildRoot = $cmakeCandidates |
         Where-Object { -not (Test-Path -LiteralPath $_) } |

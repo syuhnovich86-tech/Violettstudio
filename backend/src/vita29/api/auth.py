@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -13,12 +13,7 @@ from vita29.auth.security import (
     normalize_login,
     verify_password,
 )
-from vita29.auth.throttle import (
-    WINDOW_SECONDS,
-    clear_login_failures,
-    login_is_allowed,
-    record_login_failure,
-)
+from vita29.auth.throttle import complete_login_success, reserve_login_attempt
 from vita29.db.models import AuditLog, AuthSession, User
 from vita29.db.session import get_db
 from vita29.settings import Settings, get_settings
@@ -88,25 +83,20 @@ def user_response(user: User) -> UserResponse:
 @router.post("/login", response_model=SessionResponse)
 def login(
     payload: LoginRequest,
+    request: Request,
     response: Response,
     db: Annotated[Session, Depends(get_db)],
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> SessionResponse:
     normalized_login = normalize_login(payload.login)
-    if not login_is_allowed(normalized_login):
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many login attempts",
-            headers={"Retry-After": str(WINDOW_SECONDS)},
-        )
+    attempt = reserve_login_attempt(normalized_login, request, settings)
 
     user = db.scalar(select(User).where(User.login == normalized_login))
     password_hash = user.password_hash if user is not None else DUMMY_PASSWORD_HASH
     password_valid = verify_password(password_hash, payload.password)
     if user is None or not user.is_active or not password_valid:
-        record_login_failure(normalized_login)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-    clear_login_failures(normalized_login)
+    complete_login_success(normalized_login, attempt, settings)
 
     auth_session, raw_token = create_session(db, user, settings.session_lifetime_hours)
     db.add(

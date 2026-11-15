@@ -219,6 +219,7 @@ def calendar_visits(
     target_user_id = user.id if not can_view_all_calendars(user) else user_id
     query = select(YclientsVisit).where(
         YclientsVisit.deleted.is_(False),
+        YclientsVisit.attendance != -1,
         YclientsVisit.staff_id.not_in(select(YclientsStaffMapping.staff_id).join(User, User.id == YclientsStaffMapping.user_id).where(User.is_active.is_(False))),
         or_(YclientsVisit.user_id.is_(None), YclientsVisit.user_id.in_(select(User.id).where(User.is_active.is_(True)))),
         func.date(YclientsVisit.starts_at) >= start_date.isoformat(),

@@ -10,6 +10,7 @@
 *.token
 
 .venv/
+.test-env/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -53,6 +54,9 @@ secrets/
 *.sqlite3
 backend/.data/
 media/
+!apps/mobile/src/media/
+apps/mobile/src/media/*
+!apps/mobile/src/media/*.ts
 data/
 tmp/
 

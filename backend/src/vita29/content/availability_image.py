@@ -74,7 +74,7 @@ _TEMPLATE_ROWS = {
 
 
 def draw_availability_overlay(image: Image.Image, slots: list[dict[str, object]], template_name: str) -> Image.Image:
-    """Place each date and up to two times inside its own weekday frame."""
+    """Render all supplied start times, keeping dates outside the weekday frame."""
     geometry = _TEMPLATE_ROWS.get(template_name)
     if geometry is None:
         raise ValueError("Разметка этого шаблона свободных окон ещё не настроена")
@@ -88,18 +88,51 @@ def draw_availability_overlay(image: Image.Image, slots: list[dict[str, object]]
         except ValueError:
             continue
         raw = slot.get("times")
-        times = [str(value).strip() for value in raw if value][:2] if isinstance(raw, list) else []
+        times = sorted({str(value).strip()[:5] for value in raw if value}) if isinstance(raw, list) else []
         if not times:
             continue
-        text = f"{day:%d.%m}  {' / '.join(times)}"
-        for size in range(max(12, int(width * .041)), 9, -1):
-            font = _font(size, bold=False)
-            if font.getlength(text) <= text_right - text_left:
+        labels = times
+        if len(times) > 5:
+            step = int(slot.get('minimum_minutes') or 60)
+            groups = []
+            first = previous = times[0]
+            for value in times[1:]:
+                try:
+                    delta = (datetime.strptime(value, '%H:%M') - datetime.strptime(previous, '%H:%M')).total_seconds() / 60
+                except ValueError:
+                    raise ValueError('Неизвестный формат времени')
+                if delta > step:
+                    groups.append(first if first == previous else f'{first}–{previous}')
+                    first = value
+                previous = value
+            groups.append(first if first == previous else f'{first}–{previous}')
+            labels = groups
+        box_width = text_right - text_left
+        rows = None
+        for size in range(max(12, int(width * .035)), max(11, int(width * .017)), -1):
+            font = _font(size)
+            lines = []
+            current = ''
+            for value in labels:
+                candidate = f'{current}  {value}'.strip()
+                if current and font.getlength(candidate) > box_width:
+                    lines.append(current)
+                    current = value
+                else:
+                    current = candidate
+            if current:
+                lines.append(current)
+            max_size = width * (.021 if len(lines) == 3 else .025 if len(lines) == 2 else .035)
+            if len(lines) <= 3 and size <= max_size and all(font.getlength(line) <= box_width for line in lines) and len(lines) * size <= height * geometry[1] * .57:
+                rows = lines
                 break
-        else:
-            raise ValueError("Время не помещается в шаблон свободных окон")
-        _draw_centered(draw, text, font, (text_left + text_right) // 2,
-                       round(height * (geometry[0] + day.weekday() * geometry[1])))
+        if rows is None:
+            raise ValueError('Все свободные окна не помещаются в строку шаблона')
+        center_y = round(height * (geometry[0] + day.weekday() * geometry[1]))
+        for index, line in enumerate(rows):
+            offset = round((index - (len(rows) - 1) / 2) * size * 1.05)
+            _draw_centered(draw, line, font, (text_left + text_right) // 2, center_y + offset)
+        _draw_centered(draw, f'{day:%d.%m}', _font(max(12, int(width * .035))), round(width * .555), center_y)
     return image
 
 

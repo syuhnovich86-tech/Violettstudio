@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     session_lifetime_hours: int = Field(default=12, ge=1, le=168)
     mobile_session_lifetime_hours: int = Field(default=720, ge=24, le=2160)
     cookie_secure: bool = False
+    trusted_proxy_hosts: tuple[str, ...] = ()
+    login_throttle_path: Path | None = None
     max_file_bytes: int = Field(default=2 * 1024 * 1024 * 1024, ge=1024)
     upload_chunk_bytes: int = Field(default=1024 * 1024, ge=64 * 1024, le=8 * 1024 * 1024)
     local_utc_offset_hours: int = Field(default=3, ge=-12, le=14)

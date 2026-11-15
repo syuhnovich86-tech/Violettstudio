@@ -29,7 +29,7 @@ def _headers() -> dict[str, str]:
 
 
 def _safe_segment(value: str, label: str) -> str:
-    if not SAFE_SEGMENT.fullmatch(value):
+    if value in {".", ".."} or not SAFE_SEGMENT.fullmatch(value):
         raise HTTPException(status_code=400, detail=f"Invalid {label}")
     return value
 
@@ -60,7 +60,7 @@ def _update_id(metadata_raw: bytes) -> str:
     return str(UUID(hex=hashlib.sha256(metadata_raw).hexdigest()[:32]))
 
 
-def _asset(update_dir: Path, relative_path: str, extension: str | None, *, launch: bool, settings: Settings, runtime_version: str, platform: str) -> dict[str, str]:
+def _asset(update_dir: Path, relative_path: str, extension: str | None, *, launch: bool, settings: Settings, runtime_version: str, platform: str, public_root: str | None = None) -> dict[str, str]:
     file_path = (update_dir / relative_path).resolve()
     try:
         file_path.relative_to(update_dir.resolve())
@@ -71,7 +71,7 @@ def _asset(update_dir: Path, relative_path: str, extension: str | None, *, launc
     key = hashlib.md5(payload).hexdigest()
     ext = "bundle" if launch else (extension or file_path.suffix.lstrip(".") or "bin")
     content_type = "application/javascript" if launch else (mimetypes.guess_type(f"file.{ext}")[0] or "application/octet-stream")
-    public_root = (settings.mobile_android_public_base_url if platform == "android" else settings.yclients_public_base_url).rstrip("/")
+    public_root = (public_root or (settings.mobile_android_public_base_url if platform == "android" else settings.yclients_public_base_url)).rstrip("/")
     update_name = quote(update_dir.name, safe="")
     asset_path = quote(relative_path, safe="")
     return {
@@ -91,7 +91,8 @@ def manifest(
     expo_runtime_version: Annotated[str | None, Header(alias="expo-runtime-version")] = None,
     expo_current_update_id: Annotated[str | None, Header(alias="expo-current-update-id")] = None,
 ) -> Response:
-    _ = request
+    # Select only a trusted origin; never reflect an arbitrary Host header.
+    public_root = "https://vita29.taild51e5c.ts.net" if expo_platform == "android" and request.url.hostname == "vita29.taild51e5c.ts.net" else None
     if expo_platform not in {"android", "ios"}:
         raise HTTPException(status_code=400, detail="Unsupported platform")
     if not expo_runtime_version:
@@ -115,9 +116,9 @@ def manifest(
         "id": identifier,
         "createdAt": datetime.fromtimestamp(metadata_path.stat().st_mtime, tz=UTC).isoformat(),
         "runtimeVersion": expo_runtime_version,
-        "launchAsset": _asset(update_dir, bundle, None, launch=True, settings=settings, runtime_version=expo_runtime_version, platform=expo_platform),
+        "launchAsset": _asset(update_dir, bundle, None, launch=True, settings=settings, runtime_version=expo_runtime_version, platform=expo_platform, public_root=public_root),
         "assets": [
-            _asset(update_dir, item["path"], item.get("ext"), launch=False, settings=settings, runtime_version=expo_runtime_version, platform=expo_platform)
+            _asset(update_dir, item["path"], item.get("ext"), launch=False, settings=settings, runtime_version=expo_runtime_version, platform=expo_platform, public_root=public_root)
             for item in assets
         ],
         "metadata": {},
@@ -138,7 +139,10 @@ def asset(
         raise HTTPException(status_code=400, detail="Unsupported platform")
     runtime_dir = settings.mobile_updates_root / _safe_segment(runtime_version, "runtime version")
     update_dir = runtime_dir / _safe_segment(update_name, "update")
-    metadata, _, _ = _read_metadata(update_dir)
+    try:
+        metadata, _, _ = _read_metadata(update_dir)
+    except HTTPException as error:
+        raise HTTPException(status_code=404, detail="Asset not found") from error
     try:
         platform_metadata = metadata["fileMetadata"][platform]
         allowed = {platform_metadata["bundle"], *(item["path"] for item in platform_metadata["assets"])}

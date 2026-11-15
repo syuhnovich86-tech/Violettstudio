@@ -11,7 +11,7 @@ from PIL import Image, ImageOps, ImageFilter
 from telethon import TelegramClient, errors, functions, types
 from telethon.sessions import StringSession
 
-from vita29.api.telegram_story_login import resolve_channel, telegram_credentials
+from vita29.api.telegram_story_login import resolve_channel, telegram_credentials, telegram_account_credentials
 from vita29.db.models import MediaType
 from vita29.integrations.store import read_secret
 from vita29.media.storage import original_path
@@ -67,12 +67,17 @@ def _prepare_media(settings, media, directory: Path, index: int):
         raise TelegramStoryNotPublishedError('Не удалось подготовить видео для истории') from error
 
 
-async def _send(db, settings, publication, caption, files, prepared):
+async def _send(db, settings, publication, caption, files, prepared, target='channel'):
     try:
-        api_id, api_hash, bot, channel = telegram_credentials(settings)
-        session = read_secret(settings, 'telegram_story_session', settings.integration_secrets_path / 'unused', 'Аккаунт Telegram для историй')
+        if target == 'studio':
+            api_id, api_hash = telegram_account_credentials(settings)
+            bot, channel = '', ''
+        else:
+            api_id, api_hash, bot, channel = telegram_credentials(settings)
+        secret = 'telegram_studio_story_session' if target == 'studio' else 'telegram_story_session'
+        session = read_secret(settings, secret, settings.integration_secrets_path / 'unused', 'Аккаунт Telegram для историй')
     except Exception as error:
-        raise TelegramStoryNotPublishedError('Подключите аккаунт администратора Telegram в настройках интеграции') from error
+        raise TelegramStoryNotPublishedError('Подключите аккаунт студии Telegram в настройках интеграции' if target == 'studio' else 'Подключите аккаунт администратора Telegram в настройках интеграции') from error
     client = TelegramClient(StringSession(session), api_id, api_hash, timeout=15, connection_retries=1, retry_delay=1)
     confirmed = []
     sending = False
@@ -80,7 +85,7 @@ async def _send(db, settings, publication, caption, files, prepared):
         await client.connect()
         if not await client.is_user_authorized():
             raise TelegramStoryNotPublishedError('Сессия Telegram истекла. Подключите аккаунт заново.')
-        peer = await resolve_channel(client, bot, channel)
+        peer = types.InputPeerSelf() if target == 'studio' else await resolve_channel(client, bot, channel)
         await client(functions.stories.CanSendStoryRequest(peer=peer))
         uploads = [await client.upload_file(str(path)) for path, _ in prepared]
         for index, ((path, duration), uploaded, media) in enumerate(zip(prepared, uploads, files, strict=True)):
@@ -93,7 +98,7 @@ async def _send(db, settings, publication, caption, files, prepared):
             response = await client(functions.stories.SendStoryRequest(peer=peer, media=payload, privacy_rules=[types.InputPrivacyValueAllowAll()], caption=caption if index == 0 else None, random_id=random_id, period=86400))
             story_id = next((entry.id for entry in getattr(response, 'updates', []) if isinstance(entry, types.UpdateStoryID) and entry.random_id == random_id), None)
             if story_id is None:
-                raise TelegramStoryUncertainError('Telegram не подтвердил номер истории. Проверьте канал перед повтором.')
+                raise TelegramStoryUncertainError('Telegram не подтвердил номер истории. Проверьте аккаунт или канал перед повтором.')
             confirmed.append(story_id)
             publication.external_id = json.dumps(confirmed)
             db.commit()
@@ -106,18 +111,18 @@ async def _send(db, settings, publication, caption, files, prepared):
         messages = {'BOOSTS_REQUIRED': 'Каналу не хватает бустов для публикации историй.', 'CHAT_ADMIN_REQUIRED': 'У подключённого аккаунта нет права публиковать истории канала.', 'STORIES_TOO_MUCH': 'Достигнут лимит активных историй канала.', 'PREMIUM_ACCOUNT_REQUIRED': 'Telegram требует Premium для этого действия.'}
         if not confirmed:
             raise TelegramStoryNotPublishedError(messages.get(name, 'Telegram отклонил историю. Проверьте права и формат файла.')) from error
-        raise TelegramStoryUncertainError('Часть историй уже размещена. Проверьте канал перед повтором.') from error
+        raise TelegramStoryUncertainError('Часть историй уже размещена. Проверьте аккаунт или канал перед повтором.') from error
     except Exception as error:
         if confirmed or sending:
-            raise TelegramStoryUncertainError('Результат отправки истории неизвестен. Проверьте канал перед повтором.') from error
+            raise TelegramStoryUncertainError('Результат отправки истории неизвестен. Проверьте аккаунт или канал перед повтором.') from error
         raise TelegramStoryNotPublishedError('Не удалось подготовить подключение к Telegram. История не отправлена.') from error
     finally:
         await client.disconnect()
 
 
-def publish_telegram_stories(db, settings, publication, caption, files):
+def publish_telegram_stories(db, settings, publication, caption, files, target='channel'):
     if not 1 <= len(files) <= 10:
         raise TelegramStoryNotPublishedError('Выберите от одного до десяти фото или видео для историй')
     with _session_lock, tempfile.TemporaryDirectory(prefix='vita29-telegram-story-') as directory:
         prepared = [_prepare_media(settings, media, Path(directory), index) for index, media in enumerate(files)]
-        return asyncio.run(_send(db, settings, publication, caption, files, prepared))
+        return asyncio.run(_send(db, settings, publication, caption, files, prepared, target))

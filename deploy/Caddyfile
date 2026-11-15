@@ -1,5 +1,7 @@
 (vita29_app) {
     encode zstd gzip
+    header -Server
+    header X-Robots-Tag "noindex, nofollow, noarchive"
     @main not path /assets/vk-check/*
     @vkcheck path /assets/vk-check/*
     header @main {
@@ -20,7 +22,33 @@
     request_body {
         max_size 2GB
     }
-    reverse_proxy app:8000
+    # Public Android installers are isolated from application and media data.
+    @android_apk {
+        host 31-10-64-46.sslip.io
+        path /downloads/VIOLETTA-Android-*.apk
+        method GET HEAD
+    }
+    handle @android_apk {
+        root * /srv/android-releases
+        uri strip_prefix /downloads
+        header Content-Type application/vnd.android.package-archive
+        header Content-Disposition attachment
+        header Cache-Control "no-store"
+        file_server
+    }
+    @website_leads path /site-leads /site-leads/*
+    handle @website_leads {
+        request_body {
+            max_size 16KB
+        }
+        reverse_proxy website-leads:8000
+    }
+    handle {
+        reverse_proxy app:8000 {
+            header_up X-Vita29-Client-IP {remote_host}
+            header_down -Server
+        }
+    }
 }
 http:// {
     redir https://31-10-64-46.sslip.io{uri} permanent
@@ -31,3 +59,45 @@ http://:8080 {
 31-10-64-46.sslip.io {
     import vita29_app
 }
+
+# BEGIN VIOLETTA PUBLIC WEBSITE
+www.violettastudio.ru {
+    redir https://violettastudio.ru{uri} permanent
+}
+violettastudio.ru {
+    header {
+        -Server
+        Strict-Transport-Security "max-age=31536000"
+        X-Frame-Options "DENY"
+        Content-Security-Policy "object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+        X-Content-Type-Options nosniff
+        Referrer-Policy strict-origin-when-cross-origin
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+    }
+    @legacyStudy path /study /study/
+    redir @legacyStudy /#education 301
+    @legacyGallery path /gallery /gallery/
+    redir @legacyGallery /#team 301
+    @oldConfirmation path /thanks /thanks/ /cheklist /cheklist/ /prezentaciya /prezentaciya/
+    handle @oldConfirmation {
+        header X-Robots-Tag noindex
+        respond "Эта страница больше не используется. Перейдите на главную страницу студии." 410
+    }
+    @leadPublic path /site-leads/health /site-leads/api/leads
+    @leadPrivate path /site-leads /site-leads/*
+    route {
+        handle @leadPublic {
+            request_body {
+                max_size 16KB
+            }
+            reverse_proxy website-leads:8000
+        }
+        handle @leadPrivate {
+            respond 404
+        }
+        handle {
+            reverse_proxy unix//run/violetta-public/http.sock
+        }
+    }
+}
+# END VIOLETTA PUBLIC WEBSITE

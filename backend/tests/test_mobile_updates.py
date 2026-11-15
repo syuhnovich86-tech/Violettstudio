@@ -75,3 +75,19 @@ def test_mobile_update_rejects_invalid_request(client: TestClient, tmp_path: Pat
         params={"path": "../../test.db"},
     )
     assert response.status_code == 404
+
+
+def test_android_manifest_uses_only_trusted_fallback_host(client: TestClient, tmp_path: Path) -> None:
+    publish_test_update(client, tmp_path)
+    settings = client.app.dependency_overrides[get_settings]()
+    settings.mobile_android_public_base_url = 'https://31-10-64-46.sslip.io'
+    headers = {'expo-platform': 'android', 'expo-runtime-version': '0.1.0'}
+    for host, expected in [
+        ('vita29.taild51e5c.ts.net', 'https://vita29.taild51e5c.ts.net/'),
+        ('31-10-64-46.sslip.io', 'https://31-10-64-46.sslip.io/'),
+        ('untrusted.example', 'https://31-10-64-46.sslip.io/'),
+    ]:
+        response = client.get('/api/v1/mobile/updates/manifest', headers={**headers, 'host': host})
+        assert response.status_code == 200
+        assert response.json()['launchAsset']['url'].startswith(expected)
+        assert response.json()['assets'][0]['url'].startswith(expected)

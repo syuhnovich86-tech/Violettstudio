@@ -5,6 +5,10 @@ services:
       dockerfile: backend/Dockerfile
     restart: unless-stopped
     env_file: .env
+    # Only Caddy may assert the original client address for login throttling.
+    environment:
+      VITA29_TRUSTED_PROXY_HOSTS: '["caddy"]'
+    command: ["sh", "-c", "alembic upgrade head && uvicorn vita29.main:app --host 0.0.0.0 --port 8000 --no-proxy-headers --no-server-header"]
     volumes:
       - ${VITA29_APP_DATA_PATH:-/srv/vita29/app-data}:/data/app
       - ${VITA29_MEDIA_PATH:-/srv/vita29/media}:/data/media
@@ -61,6 +65,8 @@ services:
       - "${VITA29_LAN_IP:-192.168.1.212}:443:443/udp"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - /opt/vita29/android-releases:/srv/android-releases:ro
+      - /opt/vita29/public-website/run:/run/violetta-public:ro
       - caddy_data:/data
       - caddy_config:/config
     security_opt:

@@ -3,7 +3,7 @@ import asyncio
 import base64
 import io
 import secrets
-from typing import Annotated
+from typing import Annotated, Literal
 
 import httpx
 import qrcode
@@ -31,6 +31,14 @@ def telegram_credentials(settings: Settings) -> tuple[int, str, str, str]:
     return int(api_id), api_hash, bot, channel
 
 
+def telegram_account_credentials(settings: Settings) -> tuple[int, str]:
+    api_id = config_value(settings, 'telegram_api_id')
+    api_hash = read_secret(settings, 'telegram_api_hash', settings.integration_secrets_path / 'unused', 'Telegram API')
+    if not api_id.isdecimal():
+        raise ValueError('Не настроен Telegram API ID')
+    return int(api_id), api_hash
+
+
 async def resolve_channel(client: TelegramClient, token: str, channel: str):
     async with httpx.AsyncClient(timeout=20) as http:
         response = await http.get(f'https://api.telegram.org/bot{token}/getChat', params={'chat_id': channel})
@@ -44,10 +52,10 @@ async def resolve_channel(client: TelegramClient, token: str, channel: str):
 
 
 def safe_state(attempt: dict) -> dict:
-    return {key: attempt.get(key) for key in ('status', 'message', 'qr') if attempt.get(key) is not None}
+    return {key: attempt.get(key) for key in ('status', 'message', 'qr', 'account_hint') if attempt.get(key) is not None}
 
 
-async def finish_login(attempt: dict, client: TelegramClient, qr, bot: str, channel: str, settings: Settings):
+async def finish_login(attempt: dict, client: TelegramClient, qr, bot: str, channel: str, settings: Settings, target: str = 'channel'):
     try:
         try:
             await qr.wait()
@@ -55,6 +63,21 @@ async def finish_login(attempt: dict, client: TelegramClient, qr, bot: str, chan
             attempt.update(status='password', qr=None, message='Введите пароль двухэтапной защиты Telegram.')
             password = await asyncio.wait_for(attempt['password'].get(), timeout=120)
             await client.sign_in(password=password)
+        if target == 'studio':
+            attempt.update(status='checking', qr=None, message='Проверяем аккаунт студии…')
+            account = await client.get_me()
+            if not account or getattr(account, 'bot', False):
+                raise ValueError('Нужен личный аккаунт Telegram номера студии, а не бот')
+            phone = getattr(account, 'phone', None)
+            attempt['account_hint'] = ('••••' + phone[-4:]) if phone else (getattr(account, 'username', None) or 'аккаунт подключён')
+            await asyncio.to_thread(write_secret, settings, 'telegram_studio_story_session', client.session.save())
+            try:
+                await client(functions.stories.CanSendStoryRequest(peer=types.InputPeerSelf()))
+                message = 'Аккаунт студии подключён; Telegram разрешает публикацию личных историй.'
+            except errors.RPCError:
+                message = 'Аккаунт студии подключён, но Telegram пока не разрешил публикацию историй. Проверьте ограничения аккаунта.'
+            attempt.update(status='connected', message=message)
+            return
         attempt.update(status='checking', qr=None, message='Проверяем права в канале…')
         peer = await resolve_channel(client, bot, channel)
         result = await client(functions.channels.GetParticipantRequest(channel=peer, participant=types.InputPeerSelf()))
@@ -87,21 +110,25 @@ async def finish_login(attempt: dict, client: TelegramClient, qr, bot: str, chan
 
 
 @router.post('/start')
-async def start_login(response: Response, auth: Annotated[AuthSession, Depends(require_csrf)], user: Annotated[User, Depends(require_owner_or_administrator)], settings: Annotated[Settings, Depends(get_settings)]):
+async def start_login(response: Response, auth: Annotated[AuthSession, Depends(require_csrf)], user: Annotated[User, Depends(require_owner_or_administrator)], settings: Annotated[Settings, Depends(get_settings)], target: Literal['channel', 'studio'] = 'channel'):
     response.headers['Cache-Control'] = 'no-store'
     old = _attempts.pop(user.id, None)
     if old and old.get('task') and not old['task'].done():
         old['task'].cancel()
     try:
-        api_id, api_hash, bot, channel = telegram_credentials(settings)
+        if target == 'studio':
+            api_id, api_hash = telegram_account_credentials(settings)
+            bot, channel = '', ''
+        else:
+            api_id, api_hash, bot, channel = telegram_credentials(settings)
         client = TelegramClient(StringSession(), api_id, api_hash, timeout=10, connection_retries=1, retry_delay=1)
         await client.connect()
         qr = await client.qr_login()
         image = qrcode.make(qr.url)
         buffer = io.BytesIO(); image.save(buffer, format='PNG')
-        attempt = {'id': secrets.token_urlsafe(24), 'status': 'waiting', 'qr': 'data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode(), 'password': asyncio.Queue(maxsize=1)}
+        attempt = {'id': secrets.token_urlsafe(24), 'target': target, 'status': 'waiting', 'qr': 'data:image/png;base64,' + base64.b64encode(buffer.getvalue()).decode(), 'password': asyncio.Queue(maxsize=1)}
         _attempts[user.id] = attempt
-        attempt['task'] = asyncio.create_task(finish_login(attempt, client, qr, bot, channel, settings))
+        attempt['task'] = asyncio.create_task(finish_login(attempt, client, qr, bot, channel, settings, target))
         await asyncio.sleep(0)
         return {'attempt_id': attempt['id'], **safe_state(attempt)}
     except Exception:
@@ -113,7 +140,8 @@ async def start_login(response: Response, auth: Annotated[AuthSession, Depends(r
 async def login_status(attempt_id: str, response: Response, user: Annotated[User, Depends(require_owner_or_administrator)]):
     response.headers['Cache-Control'] = 'no-store'
     attempt = _attempts.get(user.id)
-    if not attempt or not secrets.compare_digest(attempt['id'], attempt_id): raise HTTPException(status_code=404, detail='Подключение не найдено')
+    if not attempt or not secrets.compare_digest(attempt['id'], attempt_id):
+        return {'status': 'expired', 'message': 'Срок действия кода истёк. Нажмите «Подключить аккаунт по QR», чтобы получить новый.'}
     return safe_state(attempt)
 
 
@@ -131,11 +159,12 @@ async def login_password(attempt_id: str, payload: PasswordRequest, auth: Annota
 
 
 @router.post('/disconnect')
-async def disconnect(auth: Annotated[AuthSession, Depends(require_csrf)], user: Annotated[User, Depends(require_owner_or_administrator)], settings: Annotated[Settings, Depends(get_settings)]):
+async def disconnect(auth: Annotated[AuthSession, Depends(require_csrf)], user: Annotated[User, Depends(require_owner_or_administrator)], settings: Annotated[Settings, Depends(get_settings)], target: Literal['channel', 'studio'] = 'channel'):
     # Removing the server copy does not revoke the Telegram session remotely;
     # the account owner can also terminate it in Telegram's Devices settings.
-    for attempt in _attempts.values():
-        if attempt.get('task') and not attempt['task'].done(): attempt['task'].cancel()
-    _attempts.clear()
-    write_secret(settings, 'telegram_story_session', '')
+    for key, attempt in list(_attempts.items()):
+        if attempt.get('target', 'channel') == target:
+            if attempt.get('task') and not attempt['task'].done(): attempt['task'].cancel()
+            _attempts.pop(key, None)
+    write_secret(settings, 'telegram_studio_story_session' if target == 'studio' else 'telegram_story_session', '')
     return {'status': 'disconnected'}

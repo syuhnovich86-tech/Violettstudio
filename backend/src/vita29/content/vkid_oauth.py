@@ -14,12 +14,12 @@ class VKIDError(RuntimeError):
     """Sanitised provider error; never includes token response bodies."""
 
 
-def new_authorization(client_id: str, redirect_uri: str) -> tuple[str, str, str]:
+def new_authorization(client_id: str, redirect_uri: str, scope: str = "stats groups") -> tuple[str, str, str]:
     verifier = secrets.token_urlsafe(64)
     state = secrets.token_urlsafe(32)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
     query = urlencode({"response_type": "code", "client_id": client_id, "redirect_uri": redirect_uri,
-                       "scope": "stats groups", "state": state, "code_challenge": challenge,
+                       "scope": scope, "state": state, "code_challenge": challenge,
                        "code_challenge_method": "S256"})
     return "https://id.vk.com/authorize?" + query, state, verifier
 

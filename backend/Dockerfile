@@ -22,4 +22,4 @@ COPY backend/migrations ./migrations
 RUN mkdir -p /data/app /data/media && chown -R vita29:vita29 /data /app
 USER vita29
 EXPOSE 8000
-CMD ["sh", "-c", "alembic upgrade head && uvicorn vita29.main:app --host 0.0.0.0 --port 8000"]
+CMD ["sh", "-c", "alembic upgrade head && uvicorn vita29.main:app --host 0.0.0.0 --port 8000 --no-proxy-headers --no-server-header"]

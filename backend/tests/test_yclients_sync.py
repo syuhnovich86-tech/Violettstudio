@@ -16,7 +16,8 @@ from vita29.yclients.sync import sync_yclients_visits
 
 
 class RecordsClient:
-    def list_records(self, salon_id, *, start_date, end_date, page, count):
+    def list_records(self, salon_id, *, start_date, end_date, page, count, with_deleted=False):
+        assert with_deleted is True
         assert salon_id == 956792
         assert start_date == "2026-08-01"
         assert end_date == "2026-08-31"
@@ -73,3 +74,13 @@ def test_sync_links_visit_to_confirmed_staff_mapping(tmp_path) -> None:
         assert visit.client_display_name == "Тестовый клиент"
         assert json.loads(visit.service_titles) == ["Перманентный макияж"]
         assert visit.comment == "Клиент просил натуральный результат"
+
+        class CancelledClient(RecordsClient):
+            def list_records(self, *args, **kwargs):
+                records = super().list_records(*args, **kwargs)
+                records[0]['deleted'] = True
+                return records
+
+        sync_yclients_visits(db=db, client=CancelledClient(), salon_id=956792, start_date=date(2026, 8, 1), end_date=date(2026, 8, 31))
+        db.refresh(visit)
+        assert visit.deleted is True

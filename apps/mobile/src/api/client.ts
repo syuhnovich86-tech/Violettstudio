@@ -2,7 +2,7 @@ import * as SecureStore from 'expo-secure-store';
 import { File } from 'expo-file-system';
 import { Platform } from 'react-native';
 
-export const API_ROOT = (process.env.EXPO_PUBLIC_API_URL ?? (Platform.OS === 'android' ? 'https://vita29.taild51e5c.ts.net/api/v1' : 'https://31-10-64-46.sslip.io/api/v1')).replace(/\/$/, '');
+export const API_ROOT = (Platform.OS === 'android' ? 'https://31-10-64-46.sslip.io/api/v1' : (process.env.EXPO_PUBLIC_API_URL ?? 'https://vita29.taild51e5c.ts.net/api/v1')).replace(/\/$/, '');
 const ACCESS_TOKEN_KEY = 'violetta.mobile-access-token';
 let cachedAccessToken: string | null = null;
 
@@ -34,11 +34,11 @@ export type Participant = { id: string; display_name: string };
 export type DiscussionAttachment = { media_id: string; media_type: 'image' | 'video'; original_name: string; batch_id: string | null; thumbnail_url: string; preview_url: string };
 export type DiscussionMessage = { id: string; discussion_id: string; author_id: string | null; author_name: string; body: string | null; reply_to: { id: string; author_name: string; body: string | null } | null; batch_id: string | null; attachments: DiscussionAttachment[]; reactions: Record<string, number>; my_reactions: string[]; like_count: number; liked_by_me: boolean; created_at: string };
 export type NotificationSummary = { unread_count: number; notifications: Array<{ id: string; kind: string; discussion_id: string | null; message_id: string | null; actor_name: string | null; read: boolean; created_at: string }> };
-export type ContentPublication = { id: string; platform: 'telegram' | 'max' | 'instagram' | 'vk' | 'threads'; publication_format?: 'post' | 'story' | 'reel'; status: string; caption: string | null; media_ids: string[]; external_id: string | null; error: string | null; published_at: string | null };
+export type ContentPublication = { id: string; platform: 'telegram' | 'telegram_studio' | 'whatsapp_studio' | 'max' | 'instagram' | 'vk' | 'threads'; publication_format?: 'post' | 'story' | 'reel'; status: string; caption: string | null; media_ids: string[]; external_id: string | null; error: string | null; published_at: string | null };
 export type ContentArchiveEntry = { publication_id: string; item_id: string; title: string; description: string | null; platform: ContentPublication['platform']; platforms?: ContentPublication['platform'][]; publication_format: string; published_at: string; media_ids: string[]; preview_media_id: string | null };
 export type ContentArchivePage = { items: ContentArchiveEntry[]; next_offset: number | null };
 export type ContentItem = { id: string; title: string; caption: string | null; editor_instruction: string | null; visual_edit_requested?: boolean; content_format: 'post' | 'story' | 'availability'; media_limit: number; availability_staff_id: number | null; availability_slots: Array<Record<string, unknown>>; status: string; scheduled_at: string; publication_date_assigned?: boolean; media_ids: string[]; created_by_id: string; approved_by_id: string | null; approved_at: string | null; publications: ContentPublication[]; created_at: string; updated_at: string };
-export type ContentLibrary = { items: Array<{ id: string; original_name: string; media_type: 'image' | 'video'; thumbnail_url: string; comment: string | null; content_marked: boolean; workspace_id: string; workspace_name: string }>; workspaces: Array<{ id: string; display_name: string; kind: 'studio' | 'private' }>; total: number; next_offset: number | null };
+export type ContentLibrary = { items: Array<{ id: string; original_name: string; media_type: 'image' | 'video'; thumbnail_url: string; comment: string | null; content_marked: boolean; publication_allowed: boolean; workspace_id: string; workspace_name: string }>; workspaces: Array<{ id: string; display_name: string; kind: 'studio' | 'private' }>; total: number; next_offset: number | null };
 export type StorageStatus = { total_bytes: number; used_bytes: number; free_bytes: number; media_bytes: number; used_percent: number };
 export type IntegrationStatus = Record<'openai' | 'telegram' | 'max' | 'instagram' | 'vk' | 'threads' | 'threads', { configured: boolean; fields: Record<string, string> }>;
 export type SessionResponse = { user: ApiUser; csrf_token: string };
@@ -65,7 +65,17 @@ export async function allowBackgroundAccessToSession() {
 }
 
 export function apiUrl(path: string) {
-  if (/^https?:\/\//i.test(path)) return path;
+  if (/^https?:\/\//i.test(path)) {
+    // Older server responses/cached media may contain the former public URL.
+    // Move only this app's API links; unrelated external links stay unchanged.
+    if (Platform.OS === 'android') {
+      const url = new URL(path);
+      if (url.hostname === 'vita29.taild51e5c.ts.net' && url.pathname.startsWith('/api/v1/')) {
+        return `${API_ROOT}${url.pathname.slice('/api/v1'.length)}${url.search}${url.hash}`;
+      }
+    }
+    return path;
+  }
   const normalized = path.startsWith('/api/v1/') ? path.slice('/api/v1'.length) : path;
   return `${API_ROOT}${normalized.startsWith('/') ? normalized : `/${normalized}`}`;
 }
@@ -93,8 +103,8 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}, mut
   let response: Response;
   try { response = await fetch(apiUrl(path), { ...options, headers, credentials: 'include', signal: controller.signal }); }
   catch (error) {
-    if (controller.signal.aborted && !options.signal?.aborted) throw new ApiError('Сервер не ответил вовремя. Повторите попытку.', 0);
-    if (error instanceof TypeError) throw new ApiError('Нет связи с сервером. Проверьте интернет.', 0);
+    if (controller.signal.aborted && !options.signal?.aborted) throw new ApiError('Сервер не ответил вовремя. Проверьте соединение и состояние операции.', 0);
+    if (error instanceof TypeError || (error instanceof Error && /fetch failed|network request failed|unknownhostexception|unable to resolve host/i.test(error.message))) throw new ApiError('Нет связи с сервером. Проверьте интернет и повторите обновление страницы.', 0);
     throw error;
   } finally {
     clearTimeout(timeout);
@@ -139,7 +149,7 @@ export async function uploadMedia(input: { uri: string; filename: string; mediaT
   const form = new FormData();
   const file = new File(input.uri);
   form.append('upload', file, input.filename);
-  return apiRequest<MediaFile>(query('/media', { workspace_id: input.workspaceId, yclients_record_id: input.visitId, batch_id: input.batchId, publication_allowed: input.publicationAllowed ?? false }), { method: 'POST', body: form }, true, input.mediaType === 'video' ? 900_000 : 180_000);
+  return apiRequest<MediaFile>(query('/media', { workspace_id: input.workspaceId, yclients_record_id: input.visitId, batch_id: input.batchId, publication_allowed: input.publicationAllowed ?? true }), { method: 'POST', body: form }, true, input.mediaType === 'video' ? 900_000 : 180_000);
 }
 
 export const iphoneImportStatus = (workspaceId: string, importKey: string) => apiRequest<{ exists: boolean }>(query('/media/ios-import/status', { workspace_id: workspaceId }), { headers: { 'X-Ios-Import-Key': importKey } });
@@ -186,7 +196,7 @@ export const updatePublicationMedia = (id: string, platform: string, publication
 export const updatePublicationCaption = (id: string, platform: string, caption: string | null, publicationId?: string) => apiRequest<ContentItem>(`/content/items/${id}/publications/${platform}/caption${publicationId ? `?publication_id=${encodeURIComponent(publicationId)}` : ''}`, { method: 'PATCH', body: JSON.stringify({ caption }) }, true);
 export const publishTelegram = (id: string) => apiRequest<ContentItem>(`/content/items/${id}/publications/telegram`, { method: 'POST' }, true, 120_000);
 export const deleteContent = (id: string) => apiRequest<void>(`/content/items/${id}`, { method: 'DELETE' }, true);
-export const getContentLibrary = (workspace_id?: string, search?: string, offset = 0) => apiRequest<ContentLibrary>(query('/content/media-library', { workspace_id, search, offset, limit: 100, sort: Platform.OS === 'android' && workspace_id ? 'recent' : undefined }));
+export const getContentLibrary = (workspace_id?: string, search?: string, offset = 0) => apiRequest<ContentLibrary>(query('/content/media-library', { workspace_id, search, offset, limit: 100, sort: Platform.OS === 'android' ? 'archive' : undefined, include_forbidden: Platform.OS === 'android' ? true : undefined }));
 
 export const getStorage = () => apiRequest<StorageStatus>('/storage');
 export const changePassword = (current_password: string, new_password: string) => apiRequest<void>('/auth/password', { method: 'PUT', body: JSON.stringify({ current_password, new_password }) }, true);

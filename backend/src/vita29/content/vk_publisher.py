@@ -21,6 +21,11 @@ def _call(method, token, **params):
     payload = response.json()
     if "error" in payload:
         # Never include VK's response or request URL: it could contain a token.
+        code = payload.get("error", {}).get("error_code")
+        if method == "photos.getWallUploadServer" and code == 27:
+            raise ValueError("VK не принимает ключ сообщества для загрузки фото на стену. Нужен пользовательский ключ администратора с доступом к фотографиям.")
+        if code == 5:
+            raise ValueError("VK отклонил ключ для публикаций: он истёк или недействителен для сервера. Подключите ключ повторно.")
         raise ValueError(f"ВКонтакте отклонил {method}; проверьте права токена и ID сообщества")
     if "response" not in payload:
         raise ValueError(f"ВКонтакте не подтвердил {method}")

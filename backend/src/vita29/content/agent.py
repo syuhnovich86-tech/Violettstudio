@@ -10,6 +10,7 @@ from pathlib import Path
 import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from vita29.content.text import normalize_pm
 
 from vita29.db.models import (
     ContentFormat,
@@ -698,4 +699,4 @@ def prepare_telegram_draft(
         for media_id in selected_media_ids
     )):
         raise ContentAgentError("Запрос с видео должен содержать хотя бы один выбранный видеофайл")
-    return PreparedTelegramDraft(caption=caption, media_ids=selected_media_ids)
+    return PreparedTelegramDraft(caption=normalize_pm(caption), media_ids=selected_media_ids)

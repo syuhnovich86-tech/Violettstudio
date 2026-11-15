@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
 
@@ -71,6 +72,35 @@ def jpeg_bytes() -> bytes:
     return output.getvalue()
 
 
+def test_phone_sync_defaults_to_publishable_for_new_files(client: TestClient, tmp_path: Path) -> None:
+    owner, _ = add_user(tmp_path / "test.db", "sync-owner", UserRole.OWNER)
+    engine = create_database_engine(f"sqlite:///{tmp_path / 'test.db'}")
+    with Session(engine) as db:
+        db.get(User, owner.id).can_import_ios_photo_library = True
+        folder = Workspace(display_name="Sync", kind=WorkspaceKind.PRIVATE, owner_id=owner.id)
+        db.add(folder)
+        db.commit()
+        folder_id = folder.id
+    login = client.post("/api/v1/mobile/auth/login", json={"login": "sync-owner", "password": PASSWORD})
+    assert login.status_code == 200
+    for index, platform in enumerate(("ios", "android")):
+        data = jpeg_bytes() + bytes([index])
+        headers = {"Authorization": "Bearer " + login.json()["access_token"], f"X-{platform}-Import-Key": str(index + 1) * 64, f"X-{platform}-Filename": f"{platform}.jpg"}
+        url = f"/api/v1/media/{platform}-import"
+        part = client.put(f"{url}/chunk?workspace_id={folder_id}&total={len(data)}&offset=0", headers=headers, content=data)
+        assert part.status_code == 200, part.text
+        done = client.post(f"{url}/complete?workspace_id={folder_id}&total={len(data)}", headers=headers)
+        assert done.status_code == 200, done.text
+        with Session(engine) as db:
+            assert db.get(MediaFile, done.json()["media_id"]).publication_allowed is True
+        # A retry must not override a ban set after the original upload.
+        update = client.put(f"/api/v1/media/{done.json()['media_id']}/publication", headers=headers, json={"publication_allowed": False})
+        assert update.status_code == 200
+        assert client.post(f"{url}/complete?workspace_id={folder_id}&total={len(data)}", headers=headers).status_code == 200
+        with Session(engine) as db:
+            assert db.get(MediaFile, done.json()["media_id"]).publication_allowed is False
+
+
 def test_upload_and_comment_permissions_are_enforced(client: TestClient, tmp_path: Path) -> None:
     database_path = tmp_path / "test.db"
     _, uploader_workspace = add_user(database_path, "uploader", UserRole.EMPLOYEE)
@@ -89,7 +119,17 @@ def test_upload_and_comment_permissions_are_enforced(client: TestClient, tmp_pat
         files={"upload": ("result.jpg", jpeg_bytes(), "image/jpeg")},
     )
     assert uploaded.status_code == 201
+    assert uploaded.json()["publication_allowed"] is True
     file_id = uploaded.json()["id"]
+    prohibited = client.post(
+        f"/api/v1/media?workspace_id={uploader_workspace.id}&publication_allowed=false",
+        headers={"X-CSRF-Token": csrf},
+        files={"upload": ("explicitly-blocked.jpg", jpeg_bytes(), "image/jpeg")},
+    )
+    assert prohibited.status_code == 201
+    assert prohibited.json()["publication_allowed"] is False
+    changed = client.put(f"/api/v1/media/{file_id}/publication", headers={"X-CSRF-Token": csrf}, json={"publication_allowed": False})
+    assert changed.status_code == 200 and changed.json()["publication_allowed"] is False
     sign_out(client, csrf)
 
     csrf = sign_in(client, "restricted")
@@ -406,6 +446,30 @@ def test_media_links_only_to_own_visit_and_stores_publication_choice(
     assert [visit["record_id"] for visit in calendar.json()] == [101]
 
 
+def test_calendar_hides_no_show_and_deleted_but_keeps_waiting_and_confirmed(client, tmp_path):
+    database_path = tmp_path / 'test.db'
+    employee, workspace = add_user(database_path, 'calendar-status', UserRole.EMPLOYEE)
+    engine = create_database_engine(f'sqlite:///{database_path}')
+    with Session(engine) as db:
+        for record_id, attendance, deleted in [(501, 0, False), (502, 2, False), (503, 1, False), (504, -1, False), (505, 2, True)]:
+            db.add(YclientsVisit(record_id=record_id, salon_id=1, staff_id=1, user_id=employee.id, starts_at=datetime(2026, 8, 20, 12, tzinfo=UTC), attendance=attendance, deleted=deleted))
+        db.commit()
+    csrf = sign_in(client, 'calendar-status')
+    url = '/api/v1/yclients/visits?start_date=2026-08-01&end_date=2026-08-31'
+    assert {visit['record_id'] for visit in client.get(url).json()} == {501, 502, 503}
+    for record_id in (504, 505):
+        response = client.post(f'/api/v1/media?workspace_id={workspace.id}&yclients_record_id={record_id}', headers={'X-CSRF-Token': csrf}, files={'upload': ('photo.jpg', jpeg_bytes(), 'image/jpeg')})
+        assert response.status_code == 404
+        batch = client.post('/api/v1/media/batches', headers={'X-CSRF-Token': csrf}, json={'workspace_id': workspace.id, 'yclients_record_id': record_id})
+        assert batch.status_code == 404
+    with Session(engine) as db:
+        db.get(YclientsVisit, 502).deleted = True
+        db.get(YclientsVisit, 503).attendance = -1
+        db.get(YclientsVisit, 504).attendance = 2
+        db.commit()
+    assert {visit['record_id'] for visit in client.get(url).json()} == {501, 504}
+
+
 def test_media_can_be_filtered_by_inclusive_date_range(
     client: TestClient, tmp_path: Path
 ) -> None:
@@ -437,6 +501,40 @@ def test_media_can_be_filtered_by_inclusive_date_range(
     ]
     assert len(client.get(f"{base}&date_from=2026-08-01&date_to=2026-08-31").json()) == 2
     assert client.get(f"{base}&date_from=2026-08-20&date_to=2026-08-10").status_code == 400
+
+
+def test_synced_folder_is_sorted_by_photo_date_not_upload_date(
+    client: TestClient, tmp_path: Path
+) -> None:
+    database_path = tmp_path / "test.db"
+    _, workspace = add_user(database_path, "sync-order-owner", UserRole.EMPLOYEE)
+    csrf = sign_in(client, "sync-order-owner")
+    uploaded_ids = []
+    for name in ("newer-upload.jpg", "newer-photo.jpg"):
+        response = client.post(
+            f"/api/v1/media?workspace_id={workspace.id}",
+            headers={"X-CSRF-Token": csrf},
+            files={"upload": (name, jpeg_bytes(), "image/jpeg")},
+        )
+        assert response.status_code == 201
+        uploaded_ids.append(response.json()["id"])
+
+    engine = create_database_engine(f"sqlite:///{database_path}")
+    with Session(engine) as db:
+        newer_upload = db.get(MediaFile, uploaded_ids[0])
+        newer_upload.created_at = datetime(2026, 11, 11, 12, tzinfo=UTC)
+        newer_upload.captured_at = datetime(2024, 1, 1, 12, tzinfo=UTC)
+        newer_photo = db.get(MediaFile, uploaded_ids[1])
+        newer_photo.created_at = datetime(2026, 11, 10, 12, tzinfo=UTC)
+        newer_photo.captured_at = datetime(2026, 11, 10, 12, tzinfo=UTC)
+        db.commit()
+
+    response = client.get(f"/api/v1/media?workspace_id={workspace.id}")
+    assert response.status_code == 200
+    assert [item["original_name"] for item in response.json()] == [
+        "newer-photo.jpg",
+        "newer-upload.jpg",
+    ]
 
 
 def test_calendar_day_includes_media_linked_to_visits_on_that_day(

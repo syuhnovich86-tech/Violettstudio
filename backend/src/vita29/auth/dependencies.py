@@ -11,17 +11,20 @@ from vita29.db.session import get_db
 SESSION_COOKIE = "vita29_session"
 
 
+def bearer_token(authorization: str | None) -> str | None:
+    if authorization:
+        scheme, _, value = authorization.partition(" ")
+        if scheme.casefold() == "bearer" and value:
+            return value
+    return None
+
+
 def get_current_session(
     db: Annotated[Session, Depends(get_db)],
     session_token: Annotated[str | None, Cookie(alias=SESSION_COOKIE)] = None,
     authorization: Annotated[str | None, Header()] = None,
 ) -> AuthSession:
-    bearer_token = None
-    if authorization:
-        scheme, _, value = authorization.partition(" ")
-        if scheme.casefold() == "bearer" and value:
-            bearer_token = value
-    raw_token = bearer_token or session_token
+    raw_token = bearer_token(authorization) or session_token
     if not raw_token:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
     auth_session = find_session(db, raw_token)
@@ -72,7 +75,7 @@ def require_csrf(
     csrf_token: Annotated[str | None, Header(alias="X-CSRF-Token")] = None,
     authorization: Annotated[str | None, Header()] = None,
 ) -> AuthSession:
-    if authorization and authorization.partition(" ")[0].casefold() == "bearer":
+    if bearer_token(authorization) is not None:
         return auth_session
     if not csrf_token or not secrets.compare_digest(csrf_token, auth_session.csrf_token):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid CSRF token")

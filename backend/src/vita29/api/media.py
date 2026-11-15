@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
+from vita29.api.media_ordering import archive_date, phone_workspace_ids
 
 from vita29.auth.dependencies import get_current_user, require_csrf
 from vita29.db.models import (
@@ -234,7 +235,7 @@ def list_media(
     if q and q.strip():
         term = q.strip().casefold()
         query = query.where(or_(func.casefold(MediaFile.original_name).contains(term), func.casefold(func.coalesce(MediaFile.comment, "")).contains(term)))
-    effective_date = func.coalesce(MediaFile.captured_at, MediaFile.created_at)
+    effective_date = archive_date(phone_workspace_ids(db, settings.import_workspace_name))
     local_timezone = timezone(timedelta(hours=settings.local_utc_offset_hours))
     visit_joined = False
     if calendar_date is not None:
@@ -302,7 +303,7 @@ def list_media(
                 )
             )
     files = db.scalars(
-        query.order_by(effective_date.desc(), MediaFile.id.desc())
+        query.order_by(effective_date.desc().nulls_last(), MediaFile.id.desc())
         .offset(offset)
         .limit(limit)
     ).all()
@@ -314,11 +315,12 @@ def media_filter_options(
     workspace_id: Annotated[str, Query()],
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
     capture_year: Annotated[int | None, Query(ge=1900, le=2200)] = None,
     capture_month: Annotated[int | None, Query(ge=1, le=12)] = None,
 ) -> MediaFilterOptions:
     get_accessible_workspace(db, workspace_id, user)
-    effective_date = func.coalesce(MediaFile.captured_at, MediaFile.created_at)
+    effective_date = archive_date(phone_workspace_ids(db, settings.import_workspace_name))
     active_filter = (
         MediaFile.workspace_id == workspace_id,
         MediaFile.deleted_at.is_(None),
@@ -407,7 +409,7 @@ def create_media_batch(
     visit = None
     if payload.yclients_record_id is not None:
         visit = db.get(YclientsVisit, payload.yclients_record_id)
-        if visit is None or visit.deleted:
+        if visit is None or visit.deleted or visit.attendance == -1:
             raise HTTPException(status_code=404, detail="Visit not found")
         if user.role == UserRole.EMPLOYEE and visit.user_id != user.id:
             raise HTTPException(status_code=403, detail="You cannot use this visit")
@@ -527,7 +529,7 @@ def upload_media(
     settings: Annotated[Settings, Depends(get_settings)],
     upload: Annotated[UploadFile, File()],
     workspace_id: Annotated[str, Query()],
-    publication_allowed: Annotated[bool, Query()] = False,
+    publication_allowed: Annotated[bool, Query()] = True,
     yclients_record_id: Annotated[int | None, Query()] = None,
     batch_id: Annotated[str | None, Query()] = None,
 ) -> MediaResponse:
@@ -539,7 +541,7 @@ def upload_media(
         if request.headers.get("x-ios-import-key") is not None and request.headers.get("x-android-import-key") is not None:
             raise HTTPException(status_code=400, detail="Conflicting import keys")
         scoped_import_key = (_scoped_android_import_key if request.headers.get("x-android-import-key") is not None else _scoped_ios_import_key)(request, user, workspace, settings)
-        if publication_allowed or yclients_record_id is not None or batch_id is not None:
+        if yclients_record_id is not None or batch_id is not None:
             raise HTTPException(status_code=400, detail="Invalid iPhone import destination")
         previous = db.scalar(select(MediaFile).where(MediaFile.ios_import_key == scoped_import_key))
         if previous is not None:
@@ -585,7 +587,7 @@ def upload_media(
     visit = None
     if yclients_record_id is not None:
         visit = db.get(YclientsVisit, yclients_record_id)
-        if visit is None or visit.deleted:
+        if visit is None or visit.deleted or visit.attendance == -1:
             raise HTTPException(status_code=404, detail="Visit not found")
         if user.role == UserRole.EMPLOYEE and visit.user_id != user.id:
             raise HTTPException(status_code=403, detail="You cannot use this visit")

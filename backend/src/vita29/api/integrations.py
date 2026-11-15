@@ -76,6 +76,7 @@ def _status(settings: Settings) -> IntegrationStatusResponse:
             fields={"channel": config.get("telegram_channel", ""),
                     "api_id": config.get("telegram_api_id", ""),
                     "story_session_configured": str(secret_is_configured(settings, "telegram_story_session", settings.integration_secrets_path / "unused")).lower(),
+                    "studio_story_session_configured": str(secret_is_configured(settings, "telegram_studio_story_session", settings.integration_secrets_path / "unused")).lower(),
                     "story_credentials_configured": str(bool(config.get("telegram_api_id")) and secret_is_configured(settings, "telegram_api_hash", settings.integration_secrets_path / "unused")).lower()},
         ),
         max=ProviderStatus(

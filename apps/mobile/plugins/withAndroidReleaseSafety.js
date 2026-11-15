@@ -38,9 +38,12 @@ module.exports = function withAndroidReleaseSafety(config) {
       const app = result.modResults.manifest.application[0];
       const metadata = app['meta-data'] || (app['meta-data'] = []);
       const updateUrl = metadata.find((item) => item.$['android:name'] === 'expo.modules.updates.EXPO_UPDATE_URL');
-      const url = 'https://vita29.taild51e5c.ts.net/api/v1/mobile/updates/manifest';
+      // Android has its own native update origin. The shared app.json URL
+      // remains the existing iOS endpoint until that platform is migrated.
+      const url = 'https://31-10-64-46.sslip.io/api/v1/mobile/updates/manifest';
       if (updateUrl) updateUrl.$['android:value'] = url;
       else metadata.push({ $: { 'android:name': 'expo.modules.updates.EXPO_UPDATE_URL', 'android:value': url } });
+      app.$['android:usesCleartextTraffic'] = 'false';
       return result;
     });
   }

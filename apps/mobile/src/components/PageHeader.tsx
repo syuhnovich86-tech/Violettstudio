@@ -3,6 +3,7 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { colors, typography } from '../theme';
 import { useAppChrome } from './AppChrome';
+import { HelpButton } from './HelpGuide';
 
 export function PageHeader({ kicker, title, subtitle, action, onAction }: { kicker: string; title: string; subtitle: string; action?: keyof typeof Ionicons.glyphMap; onAction?: () => void }) {
   const { openProfile } = useAppChrome();
@@ -14,6 +15,7 @@ export function PageHeader({ kicker, title, subtitle, action, onAction }: { kick
         <Text style={styles.subtitle}>{subtitle}</Text>
       </View>
       <View style={styles.actions}>
+        <HelpButton topic={title} />
         {action ? <Pressable accessibilityRole="button" onPress={onAction} style={({ pressed }) => [styles.action, pressed && styles.pressed]}>
           <Ionicons name={action} size={20} color={colors.ink} />
         </Pressable> : null}

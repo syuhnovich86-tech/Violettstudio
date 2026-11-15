@@ -4,6 +4,7 @@ import { ActivityIndicator, Modal, Pressable, ScrollView, StyleSheet, Text, Text
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { colors, typography } from '../theme';
+import { HelpButton } from './HelpGuide';
 
 export function PrimaryButton({ title, icon, onPress, disabled = false, tone = 'gold' }: { title: string; icon?: keyof typeof Ionicons.glyphMap; onPress: () => void; disabled?: boolean; tone?: 'gold' | 'ink' | 'danger' }) {
   return <Pressable accessibilityRole="button" disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.button, tone === 'ink' && styles.buttonInk, tone === 'danger' && styles.buttonDanger, (pressed || disabled) && styles.faded]}>
@@ -26,10 +27,10 @@ export function ErrorState({ message, onRetry }: { message: string; onRetry: () 
   return <View style={styles.empty}><Ionicons name="alert-circle-outline" size={38} color={colors.coral} /><Text style={styles.emptyTitle}>Не удалось загрузить</Text><Text style={styles.stateText}>{message}</Text><PrimaryButton title="Повторить" onPress={onRetry} /></View>;
 }
 
-export function Sheet({ visible, title, onClose, children, scrollRef }: PropsWithChildren<{ visible: boolean; title: string; onClose: () => void; scrollRef?: RefObject<ComponentRef<typeof ScrollView> | null> }>) {
+export function Sheet({ visible, title, onClose, children, scrollRef, helpTopic }: PropsWithChildren<{ visible: boolean; title: string; onClose: () => void; scrollRef?: RefObject<ComponentRef<typeof ScrollView> | null>; helpTopic?: string }>) {
   return <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
     <SafeAreaView edges={['top', 'bottom']} style={styles.sheetSafe}>
-      <View style={styles.sheetHeader}><Text style={styles.sheetTitle}>{title}</Text><Pressable accessibilityLabel="Закрыть" onPress={onClose} style={styles.close}><Ionicons name="close" size={23} color={colors.ink} /></Pressable></View>
+      <View style={styles.sheetHeader}><Text style={styles.sheetTitle}>{title}</Text><HelpButton topic={helpTopic ?? title} /><Pressable accessibilityLabel="Закрыть" onPress={onClose} style={styles.close}><Ionicons name="close" size={23} color={colors.ink} /></Pressable></View>
       <ScrollView ref={scrollRef} contentContainerStyle={styles.sheetContent} keyboardShouldPersistTaps="handled">{children}</ScrollView>
     </SafeAreaView>
   </Modal>;

@@ -136,6 +136,7 @@ type ContentLibraryMedia = {
   thumbnail_url: string;
   comment: string | null;
   content_marked: boolean;
+  publication_allowed: boolean;
   workspace_id: string;
   workspace_name: string;
 };
@@ -172,7 +173,7 @@ type ShareVideoStatus = {
   size_bytes: number | null;
   error: string | null;
 };
-type ContentPlatform = "telegram" | "max" | "instagram" | "vk" | "threads";
+type ContentPlatform = "telegram" | "telegram_studio" | "whatsapp_studio" | "max" | "instagram" | "vk" | "threads";
 type ContentFormat = "post" | "story" | "availability";
 type ContentVisualStyle = "auto" | "light" | "dark";
 type PublicationFormat = "post" | "story" | "reel";
@@ -722,7 +723,6 @@ function MediaPanel({
     localStorage.setItem(activeWorkspaceStorageKey, workspaceId);
     localStorage.setItem(uploadWorkspaceStorageKey, workspaceId);
     if (workspaces.find((workspace) => workspace.id === workspaceId)?.kind === "private") {
-      setPublicationAllowed(true);
       setSelectedVisitId(null);
     }
     setDateFrom("");
@@ -1409,12 +1409,12 @@ function closeCamera() {
           </div>}
         </div>
       </details>}
-      {uploadWorkspaceInfo?.kind !== "private" ? <fieldset className="publication-choice">
+      <fieldset className="publication-choice">
         <legend>Можно публиковать?</legend>
         <label className={publicationAllowed ? "active allowed" : ""}><input type="radio" name="publication" checked={publicationAllowed} onChange={() => setPublicationAllowed(true)} /><span>✓ Можно</span></label>
         <label className={!publicationAllowed ? "active forbidden" : ""}><input type="radio" name="publication" checked={!publicationAllowed} onChange={() => setPublicationAllowed(false)} /><span>⛔ Запрещено</span></label>
-      </fieldset> : <p className="private-publication-note">✓ В приватной папке публикация разрешена</p>}
-      <label className="workspace-select">Загрузить в папку<select value={uploadWorkspace} onChange={(event) => { const workspaceId = event.target.value; setUploadWorkspace(workspaceId); localStorage.setItem(uploadWorkspaceStorageKey, workspaceId); if (workspaces.find((workspace) => workspace.id === workspaceId)?.kind === "private") { setSelectedVisitId(null); setPublicationAllowed(true); } }}>{privateWorkspaces.length > 0 && <optgroup label="Приватные папки">{privateWorkspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>🔒 {workspace.display_name}</option>)}</optgroup>}{sharedWorkspaces.length > 0 && <optgroup label="Общие папки">{sharedWorkspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.display_name}</option>)}</optgroup>}</select></label>
+      </fieldset>
+      <label className="workspace-select">Загрузить в папку<select value={uploadWorkspace} onChange={(event) => { const workspaceId = event.target.value; setUploadWorkspace(workspaceId); localStorage.setItem(uploadWorkspaceStorageKey, workspaceId); if (workspaces.find((workspace) => workspace.id === workspaceId)?.kind === "private") { setSelectedVisitId(null); } }}>{privateWorkspaces.length > 0 && <optgroup label="Приватные папки">{privateWorkspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>🔒 {workspace.display_name}</option>)}</optgroup>}{sharedWorkspaces.length > 0 && <optgroup label="Общие папки">{sharedWorkspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.display_name}</option>)}</optgroup>}</select></label>
       <div className="upload-actions">
         <label className={`upload-button ${busy ? "disabled" : ""}`}>＋ Из галереи<input type="file" accept="image/*,video/*,.heic,.heif,.avif" multiple disabled={busy || !uploadWorkspace} onChange={(event) => { stageFiles(event.target.files); event.target.value = ""; }} /></label>
         <button className={`camera-button ${busy ? "disabled" : ""}`} type="button" disabled={busy || !uploadWorkspace} onClick={() => { setCameraMode("photo"); setCameraOpen(true); }}>Фото · серия</button>
@@ -1503,7 +1503,7 @@ function closeCamera() {
                   {session.user.can_access_content && file.publication_allowed && <button className={file.content_marked ? "content-mark-action marked" : "content-mark-action"} onClick={() => void updateContentMark(file, !file.content_marked)} title={file.content_marked ? "Снять отметку для контента" : "Отметить для контента"} aria-label={file.content_marked ? "Снять отметку для контента" : "Отметить для контента"}>{file.content_marked ? "●" : "○"}</button>}
                   {session.user.can_add_comments && <button onClick={() => openComment(file)} title="Добавить или изменить комментарий" aria-label="Добавить или изменить комментарий">💬</button>}
                   {session.user.can_access_chats && <button onClick={() => onCreateChat(file)} title="Создать чат с этим файлом" aria-label="Создать чат с этим файлом">◌</button>}
-                  {file.workspace_kind !== "private" && <button className={`publication-action ${file.publication_allowed ? "allowed" : "forbidden"}`} onClick={() => { void updatePublication(file, !file.publication_allowed); }} title={file.publication_allowed ? "Запретить публикацию" : "Разрешить публикацию"} aria-label={file.publication_allowed ? "Запретить публикацию" : "Разрешить публикацию"}>{file.publication_allowed ? "⛔" : "✓"}</button>}
+                  {<button className={`publication-action ${file.publication_allowed ? "allowed" : "forbidden"}`} onClick={() => { void updatePublication(file, !file.publication_allowed); }} title={file.publication_allowed ? "Запретить публикацию" : "Разрешить публикацию"} aria-label={file.publication_allowed ? "Запретить публикацию" : "Разрешить публикацию"}>{file.publication_allowed ? "⛔" : "✓"}</button>}
                   {file.can_delete && <button className="danger" onClick={() => { void remove(file); }} title="Удалить" aria-label="Удалить">×</button>}
                 </div>
               </details>
@@ -1535,7 +1535,7 @@ function closeCamera() {
                 {session.user.can_access_content && preview.publication_allowed && <button className={preview.content_marked ? "content-mark-action marked" : "content-mark-action"} onClick={() => void updateContentMark(preview, !preview.content_marked)}>{preview.content_marked ? "● Убрать отметку контента" : "○ Отметить для контента"}</button>}
                 {session.user.can_add_comments && <button onClick={() => openComment(preview)}>💬 Комментарий</button>}
                 {session.user.can_access_chats && <button onClick={() => { const file = preview; setPreview(null); onCreateChat(file); }}>◌ Создать чат</button>}
-                {preview.workspace_kind !== "private" && <button className={`publication-toggle-preview ${preview.publication_allowed ? "allowed" : "forbidden"}`} onClick={() => { void updatePublication(preview, !preview.publication_allowed); }}>{preview.publication_allowed ? "⛔ Запретить" : "✓ Разрешить"}</button>}
+                {<button className={`publication-toggle-preview ${preview.publication_allowed ? "allowed" : "forbidden"}`} onClick={() => { void updatePublication(preview, !preview.publication_allowed); }}>{preview.publication_allowed ? "⛔ Запретить" : "✓ Разрешить"}</button>}
                 {preview.can_delete && <button className="preview-delete" onClick={() => { void remove(preview); }}>× Удалить</button>}
               </div>
             </div>
@@ -2278,15 +2278,15 @@ function AdminPanel({ session }: { session: Session }) {
   );
 }
 
-function TelegramStoryConnection({ session, configured, onChange }: { session: Session; configured: boolean; onChange: () => void }) {
-  const [attempt, setAttempt] = useState<{ attempt_id: string; status: string; qr?: string | null; message?: string | null } | null>(null);
+function TelegramStoryConnection({ session, configured, onChange, target = 'channel' }: { session: Session; configured: boolean; onChange: () => void; target?: 'channel' | 'studio' }) {
+  const [attempt, setAttempt] = useState<{ attempt_id: string; status: string; qr?: string | null; message?: string | null; account_hint?: string | null } | null>(null);
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (!attempt || !['waiting', 'checking'].includes(attempt.status)) return;
     const timer = window.setInterval(() => {
-      void api<{ status: string; qr?: string | null; message?: string | null }>(`/integrations/telegram-story/status/${attempt.attempt_id}`).then((next) => {
+      void api<{ status: string; qr?: string | null; message?: string | null; account_hint?: string | null }>(`/integrations/telegram-story/status/${attempt.attempt_id}`).then((next) => {
         setAttempt((current) => current?.attempt_id === attempt.attempt_id ? { ...current, ...next } : current);
         if (next.status === 'connected') onChange();
       }).catch(() => setError('Не удалось проверить подключение.'));
@@ -2295,7 +2295,7 @@ function TelegramStoryConnection({ session, configured, onChange }: { session: S
   }, [attempt?.attempt_id, attempt?.status]);
   async function start() {
     setBusy(true); setError(''); setPassword('');
-    try { setAttempt(await api('/integrations/telegram-story/start', { method: 'POST', headers: { 'X-CSRF-Token': session.csrf_token } })); }
+    try { setAttempt(await api(`/integrations/telegram-story/start?target=${target}`, { method: 'POST', headers: { 'X-CSRF-Token': session.csrf_token } })); }
     catch (reason) { setError((reason as Error).message); } finally { setBusy(false); }
   }
   async function sendPassword() {
@@ -2307,18 +2307,36 @@ function TelegramStoryConnection({ session, configured, onChange }: { session: S
   async function disconnect() {
     if (!window.confirm('Отключить сервер от аккаунта Telegram? Также можно завершить сеанс в Telegram: Настройки → Устройства.')) return;
     setBusy(true); setError('');
-    try { await api('/integrations/telegram-story/disconnect', { method: 'POST', headers: { 'X-CSRF-Token': session.csrf_token } }); setAttempt(null); onChange(); }
+    try { await api(`/integrations/telegram-story/disconnect?target=${target}`, { method: 'POST', headers: { 'X-CSRF-Token': session.csrf_token } }); setAttempt(null); onChange(); }
     catch (reason) { setError((reason as Error).message); } finally { setBusy(false); }
   }
   return <div className="telegram-story-connection">
-    <p><strong>Истории Telegram-канала</strong> · {configured ? 'аккаунт подключён' : 'аккаунт не подключён'}</p>
-    <small>Подключите аккаунт администратора канала. Сервер получит доступ к этому аккаунту Telegram; его можно отключить в любое время.</small>
+    <p><strong>{target === 'studio' ? 'Истории Telegram аккаунта студии' : 'Истории Telegram-канала'}</strong> · {configured ? 'аккаунт подключён' : 'аккаунт не подключён'}</p>
+    <small>{target === 'studio' ? 'Подключите номер студии для личных историй.' : 'Подключите аккаунт администратора канала.'} Сервер получит доступ к этому аккаунту Telegram; его можно отключить в любое время.</small>
     <div className="content-form-actions"><button type="button" disabled={busy} onClick={() => void start()}>{configured ? 'Подключить другой аккаунт' : 'Подключить аккаунт по QR'}</button>{configured && <button type="button" disabled={busy} onClick={() => void disconnect()}>Отключить</button>}</div>
     {attempt?.qr && attempt.status === 'waiting' && <><img src={attempt.qr} width={240} height={240} alt="QR-код для входа в Telegram" /><p>В Telegram на телефоне откройте «Настройки → Устройства → Подключить устройство» и отсканируйте код.</p></>}
     {attempt?.message && <p role="status">{attempt.message}</p>}
+    {attempt?.account_hint && <p>Аккаунт: {attempt.account_hint}</p>}
     {attempt?.status === 'password' && <><label>Пароль двухэтапной защиты Telegram<input type="password" value={password} autoComplete="off" onChange={(event) => setPassword(event.target.value)} /></label><button type="button" disabled={busy || !password} onClick={() => void sendPassword()}>Подтвердить вход</button></>}
     {error && <p className="error">{error}</p>}
   </div>;
+}
+
+function WhatsAppStoryConnection({ session }: { session: Session }) {
+  const [state, setState] = useState<{ status: string; qr?: string | null } | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  async function refresh() {
+    try { setState(await api('/integrations/whatsapp-story/status')); setError(''); }
+    catch { setError('Сервис WhatsApp пока недоступен.'); }
+  }
+  useEffect(() => { void refresh(); const timer = window.setInterval(() => void refresh(), 3000); return () => window.clearInterval(timer); }, []);
+  async function start() {
+    setBusy(true); setError('');
+    try { await api('/integrations/whatsapp-story/start', { method: 'POST', headers: { 'X-CSRF-Token': session.csrf_token } }); await refresh(); }
+    catch (reason) { setError((reason as Error).message); } finally { setBusy(false); }
+  }
+  return <div className="telegram-story-connection"><p><strong>Статусы WhatsApp студии</strong> · {state?.status === 'connected' ? 'аккаунт подключён' : 'аккаунт не подключён'}</p><small>Неофициальное связанное устройство; видимость определяется настройками WhatsApp.</small>{state?.status !== 'connected' && <button type="button" disabled={busy} onClick={() => void start()}>Подключить WhatsApp по QR</button>}{state?.qr && <><img src={state.qr} width={240} height={240} alt="QR-код для подключения WhatsApp" /><p>В WhatsApp студии откройте «Связанные устройства → Привязка устройства» и отсканируйте код.</p></>}{state?.status === 'connecting' && <p>Создаём QR-код…</p>}{state?.status === 'error' && <p className="error">Подключение не удалось. Попробуйте снова.</p>}{error && <p className="error">{error}</p>}</div>;
 }
 
 function MaxStoryConnection({ session, configured, onChange }: { session: Session; configured: boolean; onChange: () => void }) {
@@ -2407,7 +2425,9 @@ function IntegrationsPanel({ session }: { session: Session }) {
         <label>API hash приложения Telegram<input name="telegram_api_hash" type="password" autoComplete="new-password" placeholder="Оставьте пустым — ключ не изменится" /></label>
         <small>Для настройки историй канала. Сохранение ключей само по себе не включает публикацию историй.</small>
         <TelegramStoryConnection session={session} configured={status?.telegram.fields.story_session_configured === 'true'} onChange={() => void load()} />
+        <TelegramStoryConnection session={session} target="studio" configured={status?.telegram.fields.studio_story_session_configured === 'true'} onChange={() => void load()} />
       </fieldset>
+      <fieldset><legend>WhatsApp</legend><WhatsAppStoryConnection session={session} /></fieldset>
       <fieldset><legend>MAX</legend><span className={status?.max.configured ? "integration-status ready" : "integration-status"}>{status?.max.configured ? "Ключ сохранён" : "Не подключено"}</span>
         <label>Токен бота / API-ключ<input name="max_bot_token" type="password" autoComplete="new-password" placeholder="Оставьте пустым — ключ не изменится" /></label>
         <label>Канал или идентификатор<input name="max_channel_id" defaultValue={status?.max.fields.channel_id} /></label><MaxStoryConnection session={session} configured={status?.max.fields.story_session_configured === 'true'} onChange={() => void load()} />
@@ -2506,6 +2526,8 @@ const CONTENT_STATUS_LABELS: Record<ContentStatus, string> = {
 };
 const CONTENT_PLATFORM_LABELS: Record<ContentPlatform, string> = {
   telegram: "Telegram",
+  telegram_studio: "Telegram · аккаунт студии",
+  whatsapp_studio: "WhatsApp · статус студии",
   max: "MAX",
   instagram: "Instagram",
   vk: "ВКонтакте",
@@ -2767,12 +2789,12 @@ function ContentAnalytics({ session }: { session: Session }) {
   </section>;
 }
 
-function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { session: Session; initialMediaIds: string[]; onInitialMediaHandled: () => void }) {
+function ContentPanel({ session, initialMediaIds, onInitialMediaHandled, onOpenWindows, initialAvailability }: { session: Session; initialMediaIds: string[]; onInitialMediaHandled: () => void; onOpenWindows: () => void; initialAvailability: boolean }) {
   const [weekStart, setWeekStart] = useState(() => mondayFor(new Date()));
   const [items, setItems] = useState<ContentItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(initialAvailability);
   const [archiveOpen, setArchiveOpen] = useState(false);
   const [analyticsOpen, setAnalyticsOpen] = useState(false);
   const [archiveItems, setArchiveItems] = useState<ContentArchiveEntry[]>([]);
@@ -2784,7 +2806,7 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
   const [planDate, setPlanDate] = useState(() => dateInputValue(new Date()));
   const [startingPlan, setStartingPlan] = useState(false);
   const startPlanOnSubmit = useRef(false);
-  const [newContentFormat, setNewContentFormat] = useState<ContentFormat>("post");
+  const [newContentFormat, setNewContentFormat] = useState<ContentFormat>(initialAvailability ? "availability" : "post");
   const [newDateAssigned, setNewDateAssigned] = useState(false);
   const [newInstagramSelected, setNewInstagramSelected] = useState(false);
   const [newTelegramSelected, setNewTelegramSelected] = useState(false);
@@ -2859,7 +2881,7 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
     const workspaceId = options.workspaceId ?? contentLibraryWorkspaceId;
     const search = options.search ?? contentLibrarySearch;
     const offset = options.offset ?? 0;
-    const params = new URLSearchParams({ limit: "60", offset: String(offset) });
+    const params = new URLSearchParams({ limit: "60", offset: String(offset), sort: "archive", include_forbidden: "true" });
     if (workspaceId) params.set("workspace_id", workspaceId);
     if (search.trim()) params.set("search", search.trim());
     setContentLibraryLoading(true);
@@ -2892,9 +2914,10 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
       </div>
       <div className="content-media-library">
         {contentLibraryLoading && contentLibrary.length === 0 ? <p className="muted">Загружаю материалы…</p> : contentLibrary.length === 0 ? <p className="muted">Нет доступных материалов по этому фильтру.</p> : contentLibrary.map((media) => <label key={media.id} className={selected.includes(media.id) ? "selected" : ""}>
-          <input type="checkbox" checked={selected.includes(media.id)} onChange={() => setSelected((current) => current.includes(media.id) ? current.filter((id) => id !== media.id) : [...current, media.id].slice(0, limit))} />
+          <input type="checkbox" disabled={!media.publication_allowed} checked={selected.includes(media.id)} onChange={() => setSelected((current) => current.includes(media.id) ? current.filter((id) => id !== media.id) : [...current, media.id].slice(0, limit))} />
           <img src={media.thumbnail_url} alt="" />
           <span>{media.media_type === "video" ? "🎬 Видео" : "Фото"} · {media.workspace_name}{media.content_marked ? " · ✦ контент" : ""}</span>
+          {!media.publication_allowed && <small>Публикация запрещена. Изменить разрешение можно в архиве.</small>}
           {media.comment && <small>{media.comment}</small>}
         </label>)}
       </div>
@@ -2912,7 +2935,7 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
     event.preventDefault();
     const formElement = event.currentTarget;
     const form = new FormData(formElement);
-    const platforms = (["telegram", "max", "instagram", "vk", "threads"] as ContentPlatform[]).filter((platform) => form.get(platform) === "on");
+    const platforms = (["telegram", "telegram_studio", "whatsapp_studio", "max", "instagram", "vk", "threads"] as ContentPlatform[]).filter((platform) => form.get(platform) === "on");
     const contentFormat = newContentFormat;
     if (!platforms.length) {
       setError("Выберите хотя бы одну площадку");
@@ -2930,7 +2953,7 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
           scheduled_at: new Date(String(form.get("scheduled_at"))).toISOString(),
           publication_date_assigned: newDateAssigned,
           platforms,
-          platform_formats: Object.fromEntries(platforms.map((platform) => [platform, platform === "instagram" ? newInstagramFormat : platform === 'telegram' ? newTelegramFormat : platform === 'max' ? newMaxFormat : "post"])),
+          platform_formats: Object.fromEntries(platforms.map((platform) => [platform, (platform === "telegram_studio" || platform === "whatsapp_studio") ? "story" : platform === "instagram" ? newInstagramFormat : platform === 'telegram' ? newTelegramFormat : platform === 'max' ? newMaxFormat : "post"])),
           media_ids: selectedSourceMedia,
           content_format: contentFormat,
           media_limit: Number(form.get("media_limit") || 1),
@@ -3269,7 +3292,8 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
       if (dialog.kind === "regenerate") {
         const visualRequest = 'Создать фирменное изображение для публикации.';
         const isReel = dialog.item.publications.some((publication) => publication.platform === 'instagram' && publication.publication_format === 'reel');
-        const isStorySeries = dialog.item.media_ids.length > 1 && dialog.item.publications.some((publication) => publication.platform === 'instagram' && publication.publication_format === 'story');
+        const wantsCollage = /кол+аж|калаж|нескольк\p{L}*(?:\s+\S+){0,3}\s+(?:фото|снимк|кадр)/iu.test(`${dialog.item.title}\n${next}`);
+        const isStorySeries = !wantsCollage && dialog.item.media_ids.length > 1 && dialog.item.publications.some((publication) => ['instagram', 'telegram', 'telegram_studio', 'whatsapp_studio', 'max'].includes(publication.platform) && publication.publication_format === 'story');
         const instruction = dialog.item.visual_edit_requested || isReel || isStorySeries || next.includes(visualRequest) ? next : [next.slice(0, 1000 - visualRequest.length - 1), visualRequest].filter(Boolean).join('\n');
         await api<ContentItem>(`/content/items/${dialog.item.id}`, { method: 'PATCH', headers: { 'X-CSRF-Token': session.csrf_token }, body: JSON.stringify({ editor_instruction: instruction || null }) });
         await api<ContentItem>(`/content/items/${dialog.item.id}/prepare`, { method: 'POST', headers: { 'X-CSRF-Token': session.csrf_token } });
@@ -3342,20 +3366,21 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
   return <section className="content-planner">
     <div className="section-heading content-heading"><div><p className="eyebrow">Контент студии</p><h1>Темы на неделю</h1><p>Вы согласуете только темы. После утверждения плана агент заранее подберёт материалы, прочитает комментарии, подготовит тексты для трёх площадок и будет публиковать их по расписанию.</p></div><span>{items.length}</span></div>
     <div className="content-form-actions">
-      <button type="button" onClick={() => { setArchiveOpen(false); setCreateMode('day'); setNewContentFormat('availability'); setCreating(true); }}>Свободные окошки</button>
-      <button type="button" onClick={() => { setArchiveOpen(false); setCreateMode('day'); setNewContentFormat('post'); setCreating(true); }}>Создать публикацию</button>
-      <button type="button" onClick={() => { setArchiveOpen(false); setPlanDay(true); setPlanDate(dateInputValue(new Date())); setCreateMode('week'); setCreating(true); }}>План на день</button>
-      <button type="button" onClick={() => { setArchiveOpen(false); setPlanDay(false); setCreateMode('week'); setCreating(true); }}>План на неделю</button>
-      <button type="button" onClick={() => { setCreating(false); setArchiveOpen((open) => !open); if (!archiveOpen) void loadArchive(); }}>Архив публикаций</button>
-      {session.user.can_access_analytics && <button type="button" onClick={() => setAnalyticsOpen((open) => !open)}>Аналитика</button>}
+
+      <button type="button" onClick={onOpenWindows}>Окошки</button>
+      <button type="button" onClick={() => { setArchiveOpen(false); setAnalyticsOpen(false); setCreateMode('day'); setNewContentFormat('post'); setCreating(true); }}>Создать публикацию</button>
+      <button type="button" onClick={() => { setArchiveOpen(false); setAnalyticsOpen(false); setPlanDay(true); setPlanDate(dateInputValue(new Date())); setCreateMode('week'); setCreating(true); }}>План на день</button>
+      <button type="button" onClick={() => { setArchiveOpen(false); setAnalyticsOpen(false); setPlanDay(false); setCreateMode('week'); setCreating(true); }}>План на неделю</button>
+      <button type="button" onClick={() => { setCreating(false); setAnalyticsOpen(false); setArchiveOpen((open) => !open); if (!archiveOpen) void loadArchive(); }}>Архив публикаций</button>
+      {session.user.can_access_analytics && <button type="button" onClick={() => { setCreating(false); setArchiveOpen(false); setAnalyticsOpen((open) => !open); }}>Аналитика</button>}
     </div>
     {analyticsOpen && <ContentAnalytics session={session} />}
     {archiveOpen && <section><h2>Архив публикаций</h2>{!archiveItems.length && <p>Опубликованных материалов пока нет.</p>}{archiveItems.map((entry) => <article className="content-card" key={entry.publication_id}><div className="analytics-switch">{(['telegram', 'instagram', 'max', 'vk', 'threads'] as ContentPlatform[]).map(platform => <span key={platform} style={{padding:'6px 10px', borderRadius:12, background:(entry.platforms ?? [entry.platform]).includes(platform)?'#d6efd9':'#eee', color:(entry.platforms ?? [entry.platform]).includes(platform)?'#205c31':'#777'}}>{(entry.platforms ?? [entry.platform]).includes(platform)?'●':'○'} {CONTENT_PLATFORM_LABELS[platform]}</span>)}</div><small>Последнее размещение: {new Date(entry.published_at).toLocaleString('ru-RU')}. Повтор использует его версию.</small><h3>{entry.title}</h3><p>{entry.description}</p>{entry.preview_media_id && <img style={{ maxWidth: 220 }} src={`/api/v1/content/archive/${entry.publication_id}/media/${entry.preview_media_id}`} alt="Материал публикации" />}<button type="button" onClick={() => { setArchiveSelected(entry.publication_id); setArchiveTargets([entry.platform]); }}>Разместить повторно</button>{archiveSelected === entry.publication_id && <><div>{(['telegram', 'max', 'instagram', 'vk', 'threads'] as ContentPlatform[]).map((platform) => <label key={platform}><input type="checkbox" checked={archiveTargets.includes(platform)} onChange={() => setArchiveTargets((current) => current.includes(platform) ? current.filter((value) => value !== platform) : [...current, platform])} />{CONTENT_PLATFORM_LABELS[platform]}</label>)}</div><button type="button" disabled={!archiveTargets.length} onClick={() => void reuseArchive(entry.publication_id)}>Создать публикацию</button></>}</article>)}{archiveNext !== null && <button type="button" onClick={() => void loadArchive(archiveNext)}>Показать ещё</button>}</section>}
-    <div className="content-week-bar"><button type="button" onClick={() => changeWeek(-7)}>←</button><strong>{formatter.format(weekStart)} — {formatter.format(weekEnd)}</strong><button type="button" onClick={() => changeWeek(7)}>→</button></div>
-    <div className="content-summary"><div><b>{activeItems.length}</b><span>ожидают публикации</span></div><div><b>{activeItems.filter((item) => ["approved", "generating", "ready", "scheduled"].includes(item.status)).length}</b><span>тем утверждено</span></div><div><b>{activeItems.filter((item) => ["ready", "scheduled"].includes(item.status)).length}</b><span>материалов готово</span></div></div>
+    {!archiveOpen && !analyticsOpen && !creating && <><div className="content-week-bar"><button type="button" onClick={() => changeWeek(-7)}>←</button><strong>{formatter.format(weekStart)} — {formatter.format(weekEnd)}</strong><button type="button" onClick={() => changeWeek(7)}>→</button></div>
+    <div className="content-summary"><div><b>{activeItems.length}</b><span>ожидают публикации</span></div><div><b>{activeItems.filter((item) => ["approved", "generating", "ready", "scheduled"].includes(item.status)).length}</b><span>тем утверждено</span></div><div><b>{activeItems.filter((item) => ["ready", "scheduled"].includes(item.status)).length}</b><span>материалов готово</span></div></div></>}
     {creating && <div className="content-create-box">
     {createMode === "day" ? <form className="content-create-form" onSubmit={createItem}>
-      <fieldset className="content-format-choice"><legend>Что готовим</legend><label><input type="radio" name="content_format" value="post" checked={newContentFormat === "post"} onChange={() => setNewContentFormat("post")} />Пост</label><label><input type="radio" name="content_format" value="story" checked={newContentFormat === "story"} onChange={() => setNewContentFormat("story")} />История</label><label><input type="radio" name="content_format" value="availability" checked={newContentFormat === "availability"} onChange={() => setNewContentFormat("availability")} />Свободные окна</label></fieldset>
+
       {newContentFormat !== "availability" && <fieldset className="content-visual-style-choice"><legend>Стиль макета</legend><label><input type="radio" name="visual_style" value="auto" checked={newVisualStyle === "auto"} onChange={() => setNewVisualStyle("auto")} />Авто</label><label><input type="radio" name="visual_style" value="light" checked={newVisualStyle === "light"} onChange={() => setNewVisualStyle("light")} />Светлый / белый</label><label><input type="radio" name="visual_style" value="dark" checked={newVisualStyle === "dark"} onChange={() => setNewVisualStyle("dark")} />Тёмный / чёрный</label><small className="muted">Выбранный стиль фиксируется: светлый всегда получает светлую основу, тёмный — чёрно‑золотую.</small></fieldset>}
       {newContentFormat !== "availability" && <label>{sourceImageEdit ? "Результат обработки" : "Тема"}<div className="voice-input-row"><input name="title" minLength={2} maxLength={180} required value={newTitle} onChange={(event) => setNewTitle(event.target.value)} placeholder={sourceImageEdit ? "Например, ретушь результата перманента губ" : "Например, результат процедуры до/после"} /><VoiceInputButton csrfToken={session.csrf_token} onAppend={(spoken) => setNewTitle((current) => appendDictatedText(current, spoken))} /></div><small className="muted">Можно надиктовать тему: нажмите «Стоп», и текст появится в поле.</small></label>}
       {newContentFormat === "availability" && <label>Мастер для окон<select name="availability_staff_id" required defaultValue=""><option value="" disabled>Выберите мастера</option>{availabilityStaff.map((entry) => <option key={entry.staff_id} value={entry.staff_id}>{entry.staff_name}{entry.specialization ? ` — ${entry.specialization}` : ""}</option>)}</select><small className="muted">Будет использован только шаблон, в комментарии к которому указан этот мастер.</small></label>}
@@ -3363,7 +3388,7 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
       <label>Фото в посте<select name="media_limit" defaultValue="1"><option value="1">1 фото</option><option value="2">2 фото</option><option value="3">3 фото</option><option value="4">4 фото</option><option value="5">5 фото</option><option value="6">6 фото</option><option value="7">7 фото</option><option value="8">8 фото</option><option value="9">9 фото</option><option value="10">10 фото</option></select><small className="muted">Для истории агент возьмёт один вертикальный материал; для «Свободных окон» — макет из папки «Шаблоны».</small></label>
       <fieldset><legend>Когда размещать</legend><label><input type="checkbox" checked={newDateAssigned} onChange={(event) => setNewDateAssigned(event.target.checked)} />Запланировать на дату и время</label></fieldset>
       {newDateAssigned ? <label>Дата и время<input name="scheduled_at" type="datetime-local" required min={dateTimeLocalValue(firstContentSlot)} defaultValue={dateTimeLocalValue(defaultSchedule)} /><small className="muted">Только будущее время. На подготовку материала автоматически заложено не менее 30 минут.</small></label> : <input type="hidden" name="scheduled_at" value={dateTimeLocalValue(defaultSchedule)} />}
-      <fieldset><legend>Площадки</legend><label><input type="checkbox" name="telegram" checked={newTelegramSelected} onChange={(event) => setNewTelegramSelected(event.target.checked)} />Telegram</label><label><input type="checkbox" name="max" checked={newMaxSelected} onChange={(event) => setNewMaxSelected(event.target.checked)} />MAX</label><label><input type="checkbox" name="instagram" checked={newInstagramSelected} onChange={(event) => setNewInstagramSelected(event.target.checked)} />Instagram</label><label><input type="checkbox" name="vk" />ВКонтакте · стена</label><label><input type="checkbox" name="threads" />Threads</label></fieldset>
+      <fieldset><legend>Площадки</legend><label><input type="checkbox" name="telegram" checked={newTelegramSelected} onChange={(event) => setNewTelegramSelected(event.target.checked)} />Telegram</label><label><input type="checkbox" name="telegram_studio" />Telegram · аккаунт студии (истории)</label><label><input type="checkbox" name="whatsapp_studio" />WhatsApp · статус студии</label><label><input type="checkbox" name="max" checked={newMaxSelected} onChange={(event) => setNewMaxSelected(event.target.checked)} />MAX</label><label><input type="checkbox" name="instagram" checked={newInstagramSelected} onChange={(event) => setNewInstagramSelected(event.target.checked)} />Instagram</label><label><input type="checkbox" name="vk" />ВКонтакте · стена</label><label><input type="checkbox" name="threads" />Threads</label></fieldset>
       {newContentFormat === 'story' && <p className="muted">«История» — формат макета. Для публикации в истории выберите соответствующий формат площадки.</p>}
       {newMaxSelected && <label>Формат MAX<select value={newMaxFormat} onChange={(event) => setNewMaxFormat(event.target.value as PublicationFormat)}><option value="post">Пост сообщества</option><option value="story">История аккаунта студии</option></select><small className="muted">Истории размещаются от подключённого аккаунта MAX, каждый файл — отдельная история.</small></label>}
       {newTelegramSelected && <label>Формат Telegram<select aria-label="Формат Telegram" value={newTelegramFormat} onChange={(event) => setNewTelegramFormat(event.target.value as PublicationFormat)}><option value="post">Пост</option><option value="story">История канала</option></select><small className="muted">Для историй подключите аккаунт администратора канала. Фото и видео размещаются отдельными историями по порядку.</small></label>}
@@ -3383,7 +3408,7 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
             <select aria-label="Количество фото" value={entry.media_limit} onChange={(event) => setWeekEntries((items) => items.map((item, position) => position === index ? { ...item, media_limit: Number(event.target.value) } : item))}>{[1,2,3,4,5,6,7,8,9,10].map((count) => <option key={count} value={count}>{count} фото</option>)}</select>
             {weekEntries.length > 1 && <button type="button" className="quiet" aria-label="Удалить строку" onClick={() => setWeekEntries((items) => items.filter((_, position) => position !== index))}>×</button>}
           </div>
-          <div className="weekly-platform-formats">{(["telegram", "instagram", "max", "vk", "threads"] as ContentPlatform[]).map((platform) => { const selected = entry.platforms.includes(platform); const formats = entry.platform_formats[platform] || ["post"]; const title = platform === "telegram" ? "Telegram" : platform === "instagram" ? "Instagram" : platform === "vk" ? "ВКонтакте · стена" : platform === "threads" ? "Threads" : "MAX"; const options: PublicationFormat[] = platform === "instagram" ? ["post", "story", "reel"] : platform === "vk" || platform === "threads" ? ["post"] : ["post", "story"]; return <div key={platform} className={`weekly-platform ${selected ? "selected" : ""}`}><label className="weekly-platform-name"><input type="checkbox" checked={selected} onChange={() => setWeekEntries((items) => items.map((item, position) => { if (position !== index) return item; const platforms = selected ? item.platforms.filter((value) => value !== platform) : [...item.platforms, platform]; const platform_formats = { ...item.platform_formats }; if (!selected && !platform_formats[platform]?.length) platform_formats[platform] = ["post"]; return { ...item, platforms, platform_formats }; }))} />{title}</label>{selected && <div className="weekly-format-list">{options.map((choice) => <label key={choice}><input type="checkbox" checked={formats.includes(choice)} onChange={() => setWeekEntries((items) => items.map((item, position) => { if (position !== index) return item; const current = item.platform_formats[platform] || ["post"]; const next = current.includes(choice) ? current.filter((value) => value !== choice) : [...current, choice]; return { ...item, platforms: next.length ? item.platforms : item.platforms.filter((value) => value !== platform), platform_formats: { ...item.platform_formats, [platform]: next } }; }))} />{choice === "post" ? "Пост" : choice === "reel" ? "Reels" : platform === "telegram" ? "История канала" : platform === "max" ? "История аккаунта" : "Сторис"}</label>)}</div>}</div>; })}</div>
+          <div className="weekly-platform-formats">{(["telegram", "telegram_studio", "whatsapp_studio", "instagram", "max", "vk", "threads"] as ContentPlatform[]).map((platform) => { const selected = entry.platforms.includes(platform); const formats = entry.platform_formats[platform] || ["post"]; const title = platform === "whatsapp_studio" ? "WhatsApp · статус студии" : platform === "telegram_studio" ? "Telegram · аккаунт студии" : platform === "telegram" ? "Telegram" : platform === "instagram" ? "Instagram" : platform === "vk" ? "ВКонтакте · стена" : platform === "threads" ? "Threads" : "MAX"; const options: PublicationFormat[] = (platform === "telegram_studio" || platform === "whatsapp_studio") ? ["story"] : platform === "instagram" ? ["post", "story", "reel"] : platform === "vk" || platform === "threads" ? ["post"] : ["post", "story"]; return <div key={platform} className={`weekly-platform ${selected ? "selected" : ""}`}><label className="weekly-platform-name"><input type="checkbox" checked={selected} onChange={() => setWeekEntries((items) => items.map((item, position) => { if (position !== index) return item; const platforms = selected ? item.platforms.filter((value) => value !== platform) : [...item.platforms, platform]; const platform_formats = { ...item.platform_formats }; if (!selected && !platform_formats[platform]?.length) platform_formats[platform] = (platform === "telegram_studio" || platform === "whatsapp_studio") ? ["story"] : ["post"]; return { ...item, platforms, platform_formats }; }))} />{title}</label>{selected && <div className="weekly-format-list">{options.map((choice) => <label key={choice}><input type="checkbox" checked={formats.includes(choice)} onChange={() => setWeekEntries((items) => items.map((item, position) => { if (position !== index) return item; const current = item.platform_formats[platform] || ["post"]; const next = current.includes(choice) ? current.filter((value) => value !== choice) : [...current, choice]; return { ...item, platforms: next.length ? item.platforms : item.platforms.filter((value) => value !== platform), platform_formats: { ...item.platform_formats, [platform]: next } }; }))} />{choice === "post" ? "Пост" : choice === "reel" ? "Reels" : platform === "telegram" ? "История канала" : platform === "max" ? "История аккаунта" : "Сторис"}</label>)}</div>}</div>; })}</div>
           {entry.platforms.includes("instagram") && entry.platform_formats.instagram?.includes("reel") && <p className="weekly-format-hint">Для Reels перед запуском плана выберите в публикации одно готовое видео.</p>}
         </div>)}
         <button type="button" className="quiet weekly-add" onClick={() => setWeekEntries((items) => [...items, { day: 0, title: "", content_format: "post", media_limit: 1, visual_style: "auto", platforms: [], platform_formats: {} }])}>＋ Ещё публикация</button>
@@ -3392,7 +3417,7 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
     </form>}</div>}
     {startingPlan && <p className="muted" role="status">Готовим материалы и запускаем план. Это может занять несколько минут.</p>}
     {error && <p className="error">{error}</p>}
-    {loading ? <p className="muted">Загружаю план…</p> : activeItems.length === 0 ? <div className="content-empty"><strong>На эту неделю публикаций пока нет</strong><span>Создайте публикацию или план.</span></div> : <div className="content-days">
+    {!creating && !archiveOpen && !analyticsOpen && (loading ? <p className="muted">Загружаю план…</p> : activeItems.length === 0 ? <div className="content-empty"><strong>На эту неделю публикаций пока нет</strong><span>Создайте публикацию или план.</span></div> : <div className="content-days">
       {Object.entries(grouped).map(([day, dayItems]) => <section className="content-day" key={day}><h2>{new Intl.DateTimeFormat("ru-RU", { weekday: "long", day: "numeric", month: "long" }).format(new Date(`${day}T12:00:00`))}<span>{dayItems.length}</span></h2><div className="content-cards">{dayItems.map((item) => <article className="content-card" key={item.id}>
         <div className="content-card-time"><strong>{new Date(item.scheduled_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}</strong><span className={`content-status ${item.status}`}>{CONTENT_STATUS_LABELS[item.status]}</span></div>
         <h3>{item.title}</h3><p className={`content-format-tag ${item.content_format}`}>{item.content_format === "post" ? `Пост · до ${item.media_limit} фото` : item.content_format === "story" ? "История · вертикальный макет" : "Свободные окна · шаблон"}</p>{item.editor_instruction && <p className="content-editor-instruction">Уточнение: {item.editor_instruction}</p>}{item.content_format !== 'availability' && ['draft', 'review', 'approved', 'failed', 'ready'].includes(item.status) && !item.publications.some((publication) => ['published', 'publishing'].includes(publication.status)) && <button type="button" className="quiet" disabled={workingId === item.id} onClick={() => openRefinementDialog(item, 'regenerate')}>Редактировать уточнение и сгенерировать заново</button>}{item.caption && <p>{item.caption}</p>}
@@ -3426,7 +3451,7 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
           {["draft", "review", "approved", "ready", "failed"].includes(item.status) && <button type="button" className="quiet" onClick={() => void remove(item)}>Удалить</button>}
         </div>
       </article>)}</div></section>)}
-    </div>}
+    </div>)}
     {refinementDialog && <div className="content-refinement-overlay" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target && workingId !== refinementDialog.item.id) setRefinementDialog(null); }}>
       <form className="content-refinement-dialog" role="dialog" aria-modal="true" aria-labelledby="content-refinement-title" onSubmit={submitRefinement}>
         <div>
@@ -3443,8 +3468,31 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled }: { ses
   </section>;
 }
 
+function AvailabilitySchedules({ session, onCreateOnce }: { session: Session; onCreateOnce: () => void }) {
+  type Schedule = { staff_id: number; enabled: boolean; frequency: 'daily' | 'weekly'; weekdays: number[]; time_local: string; publish_new: boolean; targets: Record<string, 'post' | 'story'>; next_publication_at: string | null; last_error: string | null; busy: boolean };
+  const names = ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'];
+  const defaults = (staffId: number): Schedule => ({ staff_id: staffId, enabled: false, frequency: 'daily', weekdays: [0,1,2,3,4], time_local: '10:00', publish_new: false, targets: {}, next_publication_at: null, last_error: null, busy: false });
+  const [staff, setStaff] = useState<AvailabilityStaff[]>([]);
+  const [rows, setRows] = useState<Schedule[]>([]);
+  const [selected, setSelected] = useState<number | null>(null);
+  const [form, setForm] = useState<Schedule | null>(null);
+  const [message, setMessage] = useState('');
+  const [busy, setBusy] = useState(false);
+  async function load() { try { const [people, schedules] = await Promise.all([api<AvailabilityStaff[]>('/content/availability/staff'), api<Schedule[]>('/content/availability/schedules')]); setStaff(people); setRows(schedules); } catch { setMessage('Не удалось загрузить расписание. Проверьте подключение и повторите.'); } }
+  useEffect(() => { void load(); }, []);
+  function edit(person: AvailabilityStaff) { setSelected(person.staff_id); setForm(rows.find(r => r.staff_id === person.staff_id) || defaults(person.staff_id)); setMessage(''); }
+  async function save(event: FormEvent) { event.preventDefault(); if (!form || !form.weekdays.length || !Object.keys(form.targets).length) { setMessage('Выберите дни и хотя бы одну площадку.'); return; } setBusy(true); setMessage(''); try { await api(`/content/availability/schedules/${form.staff_id}`, { method: 'PUT', headers: { 'X-CSRF-Token': session.csrf_token }, body: JSON.stringify({ enabled: form.enabled, frequency: form.frequency, weekdays: form.weekdays, time_local: form.time_local, publish_new: form.publish_new, targets: form.targets }) }); setForm(null); setSelected(null); await load(); setMessage('Расписание сохранено.'); } catch (error) { setMessage(error instanceof Error ? error.message : 'Не удалось сохранить расписание.'); } finally { setBusy(false); } }
+  return <section className="content-planner"><div className="section-heading"><div><p className="eyebrow">Свободные окошки</p><h1>Расписание публикаций</h1><p>Настройте дни, время и площадки отдельно для каждого мастера.</p></div></div>
+    <button type="button" onClick={onCreateOnce}>Создать окошки разово</button>
+    {message && <p role="status">{message}</p>}
+    <div className="availability-table-wrap"><table className="availability-table"><thead><tr><th>Мастер</th><th>Дни и время</th><th>Новые окна</th><th>Следующая</th><th></th></tr></thead><tbody>{staff.map(person => { const row=rows.find(r=>r.staff_id===person.staff_id); return <tr key={person.staff_id}><td>{person.staff_name}</td><td>{row?.enabled ? `${row.frequency==='weekly'?'Еженедельно':'Ежедневно'}: ${row.weekdays.map(d=>names[d]).join(', ')} · ${row.time_local}` : 'Выключено'}</td><td>{row?.enabled && row.publish_new ? 'Да' : '—'}</td><td>{row?.enabled && row.next_publication_at ? new Date(row.next_publication_at).toLocaleString('ru-RU', {timeZone:'Europe/Moscow'}) : '—'}{row?.last_error && <small className="error">{row.last_error}</small>}</td><td><button type="button" className="quiet" onClick={()=>edit(person)}>Настроить</button></td></tr>; })}</tbody></table></div>
+    {!staff.length && <p>Нет мастеров с настроенным шаблоном окошек.</p>}
+    {form && selected !== null && <form className="content-create-box content-create-form availability-schedule-form" onSubmit={save}><h2>{staff.find(p=>p.staff_id===selected)?.staff_name}</h2><label><input type="checkbox" checked={form.enabled} onChange={e=>setForm({...form,enabled:e.target.checked})}/> Включить автоматические публикации</label><label>Периодичность<select value={form.frequency} onChange={e=>setForm({...form,frequency:e.target.value as Schedule['frequency'],weekdays:e.target.value==='weekly'?[form.weekdays[0] ?? 0]:form.weekdays})}><option value="daily">Раз в день по выбранным дням</option><option value="weekly">Раз в неделю</option></select></label><fieldset><legend>{form.frequency==='weekly'?'День недели':'Дни недели'}</legend>{names.map((name,day)=><label key={day}><input type={form.frequency==='weekly'?'radio':'checkbox'} checked={form.weekdays.includes(day)} onChange={()=>setForm({...form,weekdays:form.frequency==='weekly'?[day]:form.weekdays.includes(day)?form.weekdays.filter(d=>d!==day):[...form.weekdays,day].sort()})}/>{name}</label>)}</fieldset><label>Время студии<input type="time" value={form.time_local} required onChange={e=>setForm({...form,time_local:e.target.value})}/></label><label><input type="checkbox" checked={form.publish_new} onChange={e=>setForm({...form,publish_new:e.target.checked})}/> Дополнительно при появлении новых окон</label><small>Проверка новых окон — примерно раз в 15 минут; повторное размещение ограничено одним разом в час. Первая проверка запоминает текущее состояние.</small><fieldset><legend>Куда размещать</legend>{(['telegram','instagram','max','vk','threads'] as const).map(platform=><label key={platform}>{CONTENT_PLATFORM_LABELS[platform]} <select value={form.targets[platform] || ''} onChange={e=>{const targets={...form.targets}; if(e.target.value) targets[platform]=e.target.value as 'post'|'story'; else delete targets[platform]; setForm({...form,targets});}}><option value="">Не размещать</option><option value="post">Пост</option>{!['vk','threads'].includes(platform) && <option value="story">История</option>}</select></label>)}</fieldset><div className="content-form-actions"><button disabled={busy}>Сохранить расписание</button><button type="button" className="quiet" onClick={()=>setForm(null)}>Отмена</button></div></form>}
+  </section>;
+}
+
 function Dashboard({ session, onLogout }: { session: Session; onLogout: () => void }) {
-  type Screen = "main" | "chats" | "admin" | "content";
+  type Screen = "main" | "chats" | "admin" | "content" | "windows";
   type MediaMode = "add" | "browse";
   const mediaModeStorageKey = `vita29-media-mode:${session.user.id}`;
   const mediaModeFromLocation = (): MediaMode => {
@@ -3456,6 +3504,7 @@ function Dashboard({ session, onLogout }: { session: Session; onLogout: () => vo
   const screenFromHash = (): Screen => {
     if (window.location.hash === "#chats" && session.user.can_access_chats) return "chats";
     if (window.location.hash === "#admin" && session.user.can_access_admin) return "admin";
+    if (window.location.hash === "#windows" && session.user.can_access_content) return "windows";
     if (window.location.hash === "#content" && session.user.can_access_content) return "content";
     return "main";
   };
@@ -3463,6 +3512,7 @@ function Dashboard({ session, onLogout }: { session: Session; onLogout: () => vo
   const [mediaMode, setMediaMode] = useState<MediaMode>(mediaModeFromLocation);
   const [chatMediaId, setChatMediaId] = useState<string | null>(null);
   const [contentMediaIds, setContentMediaIds] = useState<string[]>([]);
+  const [contentAvailability, setContentAvailability] = useState(false);
 
   useEffect(() => {
     const handleNavigation = () => {
@@ -3480,12 +3530,15 @@ function Dashboard({ session, onLogout }: { session: Session; onLogout: () => vo
     setScreen("chats");
   }
 
+  function openWindows() { if (window.location.hash !== "#windows") window.history.pushState({ screen: "windows" }, "", "#windows"); setScreen("windows"); }
+
   function openAdmin() {
     if (window.location.hash !== "#admin") window.history.pushState({ screen: "admin" }, "", "#admin");
     setScreen("admin");
   }
 
   function openContent(files: Media[] = []) {
+    setContentAvailability(false);
     setContentMediaIds(files.map((file) => file.id));
     if (window.location.hash !== "#content") window.history.pushState({ screen: "content" }, "", "#content");
     setScreen("content");
@@ -3501,7 +3554,7 @@ function Dashboard({ session, onLogout }: { session: Session; onLogout: () => vo
 
   function closePage() {
     setChatMediaId(null);
-    if (["#chats", "#admin", "#content"].includes(window.location.hash)) window.history.back();
+    if (["#chats", "#admin", "#content", "#windows"].includes(window.location.hash)) window.history.back();
     else setScreen("main");
   }
 
@@ -3512,8 +3565,8 @@ function Dashboard({ session, onLogout }: { session: Session; onLogout: () => vo
 
   return (
     <main className="app-shell">
-      <header><div className="brand"><img className="mini-mark" src="/logo.svg" alt="" /><div><strong>VIOLETTA</strong><small>{screen === "chats" ? "чаты студии" : screen === "admin" ? "администрирование" : screen === "content" ? "контент студии" : mediaMode === "add" ? "добавление материалов" : "просмотр архива"}</small></div></div><div className="header-actions">{screen !== "main" ? <button className="header-back" onClick={closePage}>← Назад</button> : <>{session.user.can_access_content && <button className="header-content" onClick={() => openContent()}><span aria-hidden="true">✦</span><b>Контент</b></button>}{session.user.can_access_admin && <button className="header-admin" onClick={openAdmin}><span aria-hidden="true">⚙</span><b>Админка</b></button>}{session.user.can_access_chats && <HeaderChatButton onOpen={() => openChats()} />}</>}<button className="quiet" onClick={logout}>Выйти</button></div></header>
-      {screen === "chats" ? <div className="content chat-page"><DiscussionsPanel session={session} initialMediaId={chatMediaId} onInitialMediaHandled={() => setChatMediaId(null)} /></div> : screen === "admin" ? <div className="content admin-page"><AdminPanel session={session} /></div> : screen === "content" ? <div className="content content-page"><ContentPanel session={session} initialMediaIds={contentMediaIds} onInitialMediaHandled={() => setContentMediaIds([])} /></div> : <div className="content">
+      <header><div className="brand"><img className="mini-mark" src="/logo.svg" alt="" /><div><strong>VIOLETTA</strong><small>{screen === "chats" ? "чаты студии" : screen === "admin" ? "администрирование" : screen === "windows" ? "расписание окошек" : screen === "content" ? "контент студии" : mediaMode === "add" ? "добавление материалов" : "просмотр архива"}</small></div></div><div className="header-actions">{screen !== "main" ? <button className="header-back" onClick={closePage}>← Назад</button> : <>{session.user.can_access_content && <button className="header-content" onClick={openWindows}><span aria-hidden="true">▦</span><b>Окошки</b></button>}{session.user.can_access_content && <button className="header-content" onClick={() => openContent()}><span aria-hidden="true">✦</span><b>Контент</b></button>}{session.user.can_access_admin && <button className="header-admin" onClick={openAdmin}><span aria-hidden="true">⚙</span><b>Админка</b></button>}{session.user.can_access_chats && <HeaderChatButton onOpen={() => openChats()} />}</>}<button className="quiet" onClick={logout}>Выйти</button></div></header>
+      {screen === "chats" ? <div className="content chat-page"><DiscussionsPanel session={session} initialMediaId={chatMediaId} onInitialMediaHandled={() => setChatMediaId(null)} /></div> : screen === "admin" ? <div className="content admin-page"><AdminPanel session={session} /></div> : screen === "windows" ? <div className="content content-page"><AvailabilitySchedules session={session} onCreateOnce={() => { setContentAvailability(true); setContentMediaIds([]); setScreen("content"); window.history.pushState({ screen: "content" }, "", "#content"); }} /></div> : screen === "content" ? <div className="content content-page"><ContentPanel session={session} initialMediaIds={contentMediaIds} onInitialMediaHandled={() => setContentMediaIds([])} initialAvailability={contentAvailability} onOpenWindows={openWindows} /></div> : <div className="content">
         <section className="welcome"><p className="eyebrow">Добро пожаловать</p><h1>{session.user.display_name}</h1><p>Рабочие папки открыты для команды, а приватные — только для приглашённых участников.</p></section>
         <StoragePanel />
         <AccountPanel session={session} />
