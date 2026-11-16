@@ -115,10 +115,6 @@ class ArchivePage(BaseModel):
     next_offset: int | None
 
 
-class ArchiveReuseRequest(BaseModel):
-    platforms: list[PublicationPlatform] = Field(min_length=1, max_length=5)
-
-
 def validate_platform_formats(value):
     supported = {
         PublicationPlatform.TELEGRAM: {"post", "story"},
@@ -139,6 +135,16 @@ def validate_platform_formats(value):
 def selected_formats(formats, platform):
     value = formats.get(platform, "story" if platform in {PublicationPlatform.TELEGRAM_STUDIO, PublicationPlatform.WHATSAPP_STUDIO} else "post")
     return [value] if isinstance(value, str) else value
+
+
+class ArchiveReuseRequest(BaseModel):
+    platforms: list[PublicationPlatform] = Field(min_length=1, max_length=7)
+    platform_formats: dict[PublicationPlatform, str | list[str]] = Field(default_factory=dict)
+
+    @field_validator("platform_formats")
+    @classmethod
+    def valid_platform_formats(cls, value):
+        return validate_platform_formats(value)
 
 
 class ContentItemCreate(BaseModel):
@@ -795,8 +801,9 @@ def reuse_archived_publication(
     db.add(item)
     db.flush()
     for platform in platforms:
-        db.add(ContentPublication(content_item_id=item.id, platform=platform, publication_format="post",
-                                  caption=caption, media_ids_json=json.dumps(media_ids)))
+        for publication_format in selected_formats(payload.platform_formats, platform):
+            db.add(ContentPublication(content_item_id=item.id, platform=platform, publication_format=publication_format,
+                                      caption=caption, media_ids_json=json.dumps(media_ids)))
     db.add(AuditLog(actor_id=user.id, action="content.reuse", target_type="content_item", target_id=item.id,
                     details=json.dumps({"source_publication_id": source.id}, ensure_ascii=False)))
     db.commit()

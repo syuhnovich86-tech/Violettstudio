@@ -179,7 +179,7 @@ export const markAllNotificationsRead = () => apiRequest<void>('/discussions/not
 export const listAvailabilityStaff = () => apiRequest<Array<{ staff_id: number; staff_name: string; specialization: string | null }>>('/content/availability/staff');
 export const listContent = (week_start: string) => apiRequest<ContentItem[]>(query('/content/items', { week_start }));
 export const listContentArchive = (offset = 0) => apiRequest<ContentArchivePage>(query('/content/archive', { offset, limit: 30 }));
-export const reuseContentArchive = (id: string, platforms: string[]) => apiRequest<ContentItem>(`/content/archive/${id}/reuse`, { method: 'POST', body: JSON.stringify({ platforms }) }, true);
+export const reuseContentArchive = (id: string, platforms: string[], platform_formats: Record<string, 'post' | 'story' | 'reel'>) => apiRequest<ContentItem>(`/content/archive/${id}/reuse`, { method: 'POST', body: JSON.stringify({ platforms, platform_formats }) }, true);
 export const createContent = (payload: Record<string, unknown>) => apiRequest<ContentItem>('/content/items', { method: 'POST', body: JSON.stringify(payload) }, true);
 export const createContentBulk = (items: Record<string, unknown>[]) => apiRequest<ContentItem[]>('/content/items/bulk', { method: 'POST', body: JSON.stringify({ items }) }, true);
 export const startContentPlan = (item_ids: string[]) => apiRequest<{ results: Array<{ id: string; scheduled: boolean; error?: string }> }>('/content/plan/start', { method: 'POST', body: JSON.stringify({ item_ids }) }, true, 3_600_000);

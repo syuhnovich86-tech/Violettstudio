@@ -19,6 +19,20 @@ import { Screen } from '../components/Screen';
 import { colors, typography } from '../theme';
 import type { RootTabs } from '../navigation/types';
 
+const ARCHIVE_CHANNELS = ['telegram', 'telegram_studio', 'whatsapp_studio', 'max', 'instagram', 'vk', 'threads'] as const;
+type ArchiveFormat = 'post' | 'story' | 'reel';
+function archiveFormats(platform: string): ArchiveFormat[] {
+  if (platform === 'telegram_studio' || platform === 'whatsapp_studio') return ['story'];
+  if (platform === 'instagram') return ['post', 'story', 'reel'];
+  if (platform === 'telegram' || platform === 'max') return ['post', 'story'];
+  return ['post'];
+}
+function archiveDefaultFormat(platform: string, original: string): ArchiveFormat {
+  const available = archiveFormats(platform);
+  return available.includes(original as ArchiveFormat) ? original as ArchiveFormat : (available[0] ?? 'post');
+}
+const archiveFormatLabel: Record<ArchiveFormat, string> = {post: 'Пост', story: 'История', reel: 'Reels'};
+const archiveChannelLabel: Record<string, string> = {telegram:'Telegram · канал', telegram_studio:'Telegram · аккаунт студии', whatsapp_studio:'WhatsApp · статус студии', max:'MAX', instagram:'Instagram', vk:'ВКонтакте · стена', threads:'Threads'};
 const statusLabels: Record<string, string> = { draft: 'Черновик', review: 'Ожидает утверждения', approved: 'Утверждено', generating: 'Генерация', ready: 'Готово', scheduled: 'Запланировано', published: 'Опубликовано', failed: 'Ошибка' };
 const formatLabels: Record<string, string> = { post: 'Пост', story: 'История', availability: 'Окошки' };
 const monday = (date: Date) => { const copy = new Date(date); const day = (copy.getDay() + 6) % 7; copy.setDate(copy.getDate() - day); copy.setHours(0, 0, 0, 0); return copy; };
@@ -82,6 +96,7 @@ export function ContentScreen({ navigation, route }: BottomTabScreenProps<RootTa
   const [archiveSelected, setArchiveSelected] = useState<ContentArchiveEntry | null>(null);
   const [archivePhotoPath, setArchivePhotoPath] = useState<string | null>(null);
   const [archiveTargets, setArchiveTargets] = useState<string[]>([]);
+  const [archiveFormatsSelected, setArchiveFormatsSelected] = useState<Record<string, ArchiveFormat>>({});
   const [dayPlan, setDayPlan] = useState(false);
   const [weekEntries, setWeekEntries] = useState<Array<{ day: number; title: string; format: 'post' | 'story'; mediaLimit: number }>>([{ day: 0, title: '', format: 'post', mediaLimit: 1 }]);
   const [platformFormats, setPlatformFormats] = useState<Record<string, 'post' | 'story' | 'reel'>>({ telegram: 'post', instagram: 'post', max: 'post', vk: 'post', threads: 'post' });
@@ -297,7 +312,7 @@ export function ContentScreen({ navigation, route }: BottomTabScreenProps<RootTa
   async function reuseArchived() {
     if (!archiveSelected || !archiveTargets.length) return;
     await mutate(async () => {
-      const copy = await reuseContentArchive(archiveSelected.publication_id, archiveTargets);
+      const copy = await reuseContentArchive(archiveSelected.publication_id, archiveTargets, Object.fromEntries(archiveTargets.map(platform => [platform, archiveFormatsSelected[platform] ?? archiveDefaultFormat(platform, archiveSelected.publication_format)])));
       setArchiveOpen(false); setArchiveSelected(null); setWeek(monday(new Date(copy.scheduled_at))); openItem(copy);
     }, 'Создана новая карточка. Выберите дату или опубликуйте её сейчас.');
   }
@@ -417,8 +432,8 @@ export function ContentScreen({ navigation, route }: BottomTabScreenProps<RootTa
         <Text style={styles.itemTitle}>{entry.title}</Text>
         {entry.description ? <Text numberOfLines={3} style={styles.itemCaption}>{entry.description}</Text> : null}
         {entry.preview_media_id ? <Pressable accessibilityRole="button" accessibilityLabel="Открыть фотографию целиком" onPress={() => setArchivePhotoPath(`/content/archive/${entry.publication_id}/media/${entry.preview_media_id}`)}><ProtectedImage path={`/content/archive/${entry.publication_id}/media/${entry.preview_media_id}`} style={styles.selectedThumb} /></Pressable> : entry.media_ids.length ? <Text style={styles.voiceHint}>В публикации есть медиафайлы</Text> : null}
-        <PrimaryButton title="Разместить повторно" icon="repeat-outline" onPress={() => { setArchiveSelected(entry); setArchiveTargets([entry.platform]); }} />
-        {archiveSelected?.publication_id === entry.publication_id ? <><Text style={styles.label}>Куда разместить</Text><View style={styles.options}>{['telegram', 'telegram_studio', 'whatsapp_studio', 'max', 'instagram', 'vk', 'threads'].map((platform) => <Pressable key={platform} accessibilityRole="checkbox" accessibilityState={{ checked: archiveTargets.includes(platform) }} onPress={() => setArchiveTargets((current) => current.includes(platform) ? current.filter((value) => value !== platform) : [...current, platform])} style={[styles.option, archiveTargets.includes(platform) && styles.optionActive]}><Text style={styles.optionText}>{platform === 'vk' ? 'ВКонтакте · стена' : platform}</Text></Pressable>)}</View><PrimaryButton title="Создать карточку для повторной публикации" icon="copy-outline" disabled={busy || !archiveTargets.length} onPress={() => void reuseArchived()} /></> : null}
+        <PrimaryButton title="Разместить повторно" icon="repeat-outline" onPress={() => { setArchiveSelected(entry); setArchiveTargets([entry.platform]); setArchiveFormatsSelected(Object.fromEntries(ARCHIVE_CHANNELS.map(platform => [platform, archiveDefaultFormat(platform, entry.publication_format)]))); }} />
+        {archiveSelected?.publication_id === entry.publication_id ? <><Text style={styles.label}>Куда разместить</Text><Text style={styles.voiceHint}>Выберите площадки и формат для каждой. Создастся новая карточка без немедленной публикации.</Text><View style={styles.options}>{ARCHIVE_CHANNELS.map((platform) => <Pressable key={platform} accessibilityRole="checkbox" accessibilityState={{ checked: archiveTargets.includes(platform) }} onPress={() => setArchiveTargets((current) => current.includes(platform) ? current.filter((value) => value !== platform) : [...current, platform])} style={[styles.option, archiveTargets.includes(platform) && styles.optionActive]}><Text style={styles.optionText}>{archiveChannelLabel[platform]}</Text></Pressable>)}</View>{archiveTargets.map(platform => <View key={platform}><Text style={styles.label}>{archiveChannelLabel[platform]} · формат</Text><View style={styles.options}>{archiveFormats(platform).map(choice => <Pressable key={choice} accessibilityRole="radio" accessibilityState={{checked: archiveFormatsSelected[platform] === choice}} onPress={() => setArchiveFormatsSelected(current => ({...current, [platform]: choice}))} style={[styles.option, archiveFormatsSelected[platform] === choice && styles.optionActive]}><Text style={styles.optionText}>{archiveFormatLabel[choice]}</Text></Pressable>)}</View></View>)}{archiveTargets.includes('instagram') && archiveFormatsSelected.instagram === 'reel' ? <Text style={styles.voiceHint}>Для Reels требуется одно видео; при необходимости измените файлы в карточке.</Text> : null}<PrimaryButton title="Создать карточку для повторной публикации" icon="copy-outline" disabled={busy || !archiveTargets.length} onPress={() => void reuseArchived()} /></> : null}
       </View>)}
       {archive.hasNextPage ? <PrimaryButton title={archive.isFetchingNextPage ? 'Загружаю…' : 'Показать ещё'} disabled={archive.isFetchingNextPage} onPress={() => void archive.fetchNextPage()} /> : null}
       <FullPhotoViewer mediaId={null} sourcePath={archiveOpen ? archivePhotoPath : null} onClose={() => setArchivePhotoPath(null)} />
