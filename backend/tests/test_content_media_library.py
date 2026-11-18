@@ -101,6 +101,7 @@ def test_marked_private_media_is_available_to_its_content_editor(
     visible = client.get(f"/api/v1/content/media-library?workspace_id={private_id}&sort=archive&include_forbidden=true")
     assert visible.status_code == 200
     assert [(item["id"], item["publication_allowed"]) for item in visible.json()["items"]] == [(file_id, False)]
+    assert client.get(f"/api/v1/content/media-library/position?media_id={file_id}").json() == {"workspace_id": private_id, "offset": 0}
     rejected = client.post(
         "/api/v1/content/items",
         headers={"X-CSRF-Token": csrf},
@@ -160,6 +161,7 @@ def test_private_content_requires_both_content_and_workspace_access(client: Test
     sign_out(client, csrf)
     csrf = sign_in(client, "private-outsider")
     assert client.get(f"/api/v1/content/media-library?workspace_id={folder_id}&include_forbidden=true").status_code == 404
+    assert client.get(f"/api/v1/content/media-library/position?media_id={media_id}").status_code == 404
     assert client.post("/api/v1/content/items", headers={"X-CSRF-Token": csrf}, json=payload).status_code == 422
     sign_out(client, csrf)
     csrf = sign_in(client, "private-no-content")
@@ -222,3 +224,17 @@ def test_content_library_is_sorted_by_upload_date_newest_first(
     first = archive_library.json()
     second = client.get(f"/api/v1/content/media-library?workspace_id={workspace.id}&sort=archive&include_forbidden=true&limit=1&offset={first['next_offset']}").json()
     assert [first["items"][0]["id"], second["items"][0]["id"]] == [item["id"] for item in archive_files[:2]]
+    selected_id = archive_files[1]["id"]
+    position = client.get(f"/api/v1/content/media-library/position?media_id={selected_id}")
+    assert position.status_code == 200
+    assert position.json() == {"workspace_id": workspace.id, "offset": 1}
+    located = client.get(f"/api/v1/content/media-library?workspace_id={workspace.id}&sort=archive&include_forbidden=true&offset={position.json()['offset']}")
+    assert located.json()["items"][0]["id"] == selected_id
+    # Phone-sync folders use capture time, not the upload date.
+    with Session(engine) as db:
+        db.get(MediaFile, older_id).ios_import_key = 'fixture-phone-item'
+        db.commit()
+    phone_position = client.get(f"/api/v1/content/media-library/position?media_id={newer_id}")
+    assert phone_position.json()["offset"] == 1
+    phone_page = client.get(f"/api/v1/content/media-library?workspace_id={workspace.id}&sort=archive&include_forbidden=true&offset=1")
+    assert phone_page.json()['items'][0]['id'] == newer_id

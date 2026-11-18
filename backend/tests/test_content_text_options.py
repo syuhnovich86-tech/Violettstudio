@@ -84,3 +84,28 @@ def test_prompt_only_collage_excludes_title_and_caption(monkeypatch):
     assert result == b'image'
     args, kwargs = captured[0]
     assert args[2] == '' and args[4] is None and kwargs['prompt_only'] is True
+
+
+@pytest.mark.parametrize('instruction, expected_title', [
+    ('Сделай коллаж', 'Брови'),
+    ('Сделай коллаж, надпись: ПМ', 'ПМ Брови'),
+    ('Сделай коллаж, надпись: пм', 'ПМ Брови'),
+])
+def test_pm_on_collage_only_when_requested(monkeypatch, instruction, expected_title):
+    item = SimpleNamespace(id='item', title='ПМ Брови', no_title_on_image=False, visual_style='auto')
+    source = [SimpleNamespace(media_type=visual.MediaType.IMAGE), SimpleNamespace(media_type=visual.MediaType.IMAGE)]
+    captured = []
+    monkeypatch.setattr(visual, 'config_value', lambda *args: 'false')
+    monkeypatch.setattr(visual, '_before_after_collage', lambda *args, **kwargs: captured.append(args) or b'image')
+    monkeypatch.setattr(visual, '_save_generated_image', lambda db, settings, item, actor, instruction, image: image)
+    visual.generate_branded_visual(None, None, item, 'actor', instruction, source, copy_hint='ПМ Акция')
+    assert captured[0][2] == expected_title
+    if 'пм' not in instruction.casefold():
+        assert 'ПМ' not in captured[0][4]
+
+
+def test_native_visual_prompt_does_not_request_unwanted_pm():
+    prompt = visual._native_visual_prompt('Брови', 'Сделай светлый фон', has_source=True, force_edit=True, style='light')
+    assert 'Do not add or render the letters' in prompt
+    requested = visual._native_visual_prompt('Брови', 'Надпись: пм', has_source=True, force_edit=True, style='light')
+    assert 'Exact editor request: Надпись: ПМ' in requested

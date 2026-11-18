@@ -897,6 +897,9 @@ def _native_visual_prompt(title: str, instruction: str, *, has_source: bool, for
     """
     editor_note = normalize_pm((instruction or '').strip()[:3000])
     topic = normalize_pm((title or '').strip()[:300])
+    pm_rule = ('Only use the abbreviation «ПМ» when explicitly requested in the editor instructions; write it uppercase. '
+               if re.search(r'(?<!\w)пм(?!\w)', editor_note, re.IGNORECASE)
+               else 'Do not add or render the letters «ПМ» anywhere in the image. ')
     if has_source and force_edit:
         return (
             'Edit the supplied photograph according to the user request. Preserve the same person, '
@@ -904,7 +907,7 @@ def _native_visual_prompt(title: str, instruction: str, *, has_source: bool, for
             'Change only the explicitly requested objects, colours, retouching, text or layout; do not introduce '
             'a different face, new treatment, frame, logo, caption, or banner unless specifically requested. '
             'For colour changes keep texture, shadows and object shape natural. Keep the original photo recognisable. '
-            'Write the Russian abbreviation for permanent makeup as exactly «ПМ», with both letters uppercase. '
+            + pm_rule +
             f'User title: {topic}\nExact editor request: {editor_note}'
         )
     family = ('warm ivory, champagne and subtle taupe, clean premium editorial design' if style == 'light'
@@ -922,7 +925,7 @@ def _native_visual_prompt(title: str, instruction: str, *, has_source: bool, for
         'not an empty template. Compose text and imagery together with clear hierarchy, generous margins and no clipping. '
         'Use tasteful serif and clean supporting type appropriate to the design. Avoid clutter and generic decorative lettering. '
         'Use VIOLETTA as a restrained wordmark; do not invent a detailed logo or inaccurate prices. '
-        'Write the Russian abbreviation for permanent makeup as exactly «ПМ», with both letters uppercase; never «Пм» or «пм». '
+        + pm_rule +
         f'{source_rule}{typography}'
         f'Topic: {topic}\nEditor instructions: {editor_note}\n'
         'Respect the editor instructions while preserving all stated facts. Do not add unrequested claims or prices.'
@@ -967,6 +970,12 @@ def generate_branded_visual(
     image_sources = [entry for entry in source_media if entry.media_type == MediaType.IMAGE][:16]
     native_visuals = config_value(settings, 'openai_native_visuals', 'true').casefold() != 'false'
     visual_title = "" if item.no_title_on_image else item.title
+    # A topic or generated caption may mention ПМ, but only the editor's
+    # instruction authorizes painting this abbreviation onto the artwork.
+    pm_requested = bool(re.search(r'(?<!\w)пм(?!\w)', instruction or '', re.IGNORECASE))
+    if not pm_requested:
+        visual_title = re.sub(r'(?<!\w)пм(?!\w)', '', visual_title, flags=re.IGNORECASE).strip()
+        copy_hint = re.sub(r'(?<!\w)пм(?!\w)', '', copy_hint, flags=re.IGNORECASE) if copy_hint else copy_hint
     if item.no_title_on_image:
         copy_hint = None
         if not instruction.strip():
@@ -998,7 +1007,8 @@ def generate_branded_visual(
         prompt = ("Create or edit the requested image using only the following user brief. "
                   "Use only text explicitly requested in the brief; do not invent headings, labels, logos or slogans. "
                   "Preserve the identity and procedure result of any supplied photographs. "
-                  "Write the abbreviation for permanent makeup as ПМ.\nUser brief: " + instruction)
+                  + ("Use «ПМ» only if requested, with both letters uppercase. " if pm_requested else "Do not add or render the letters «ПМ». ")
+                  + "\nUser brief: " + instruction)
     detailed_model = image_model.startswith(('gpt-image-2.5', 'gpt-image-2.6'))
     image_options = {'model': image_model, 'prompt': prompt, 'size': '1024x1536',
                      'quality': 'xhigh' if native_visuals and detailed_model else 'high',

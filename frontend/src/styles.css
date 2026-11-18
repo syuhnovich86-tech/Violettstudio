@@ -829,3 +829,9 @@ summary { color:var(--gold); cursor:pointer; font-weight:750; }
 
 .content-option-check, .content-create-form > .content-option-check { display:flex; align-items:center; gap:8px; }
 .content-option-check input[type="checkbox"], .content-create-form .content-option-check input[type="checkbox"] { width:18px; height:18px; min-height:0; max-width:18px; padding:0; margin:0; flex:0 0 18px; accent-color:#bd7a20; }
+
+.content-selected-preview { margin:12px 0; }
+.content-selected-preview > div { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+.content-selected-preview button { position:relative; padding:0; width:72px; height:72px; border:2px solid #bd7a20; border-radius:10px; overflow:hidden; background:#fff; }
+.content-selected-preview img { display:block; width:100%; height:100%; object-fit:cover; }
+.content-selected-preview button span { position:absolute; right:2px; top:2px; min-width:24px; height:24px; border-radius:50%; color:#fff; background:#30251d; line-height:24px; }

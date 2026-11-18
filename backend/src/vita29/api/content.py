@@ -349,6 +349,29 @@ def transcribe_content_voice(
     return VoiceTranscriptionResponse(text=text.strip())
 
 
+@router.get("/media-library/position")
+def content_media_position(
+    media_id: str,
+    user: Annotated[User, Depends(require_content_access)],
+    db: Annotated[Session, Depends(get_db)],
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> dict[str, str | int]:
+    """Locate an accessible selected item in the same order as its archive folder."""
+    media = db.get(MediaFile, media_id)
+    if (media is None or media.deleted_at is not None
+        or media.media_type not in {MediaType.IMAGE, MediaType.VIDEO}
+        or media.workspace.deleted_at is not None or not can_access_workspace(db, media.workspace, user)):
+        raise HTTPException(status_code=404, detail="Материал недоступен")
+    phone_ids = phone_workspace_ids(db, settings.import_workspace_name)
+    order_date = MediaFile.captured_at if media.workspace_id in phone_ids else archive_date(phone_ids)
+    ranked = select(MediaFile.id.label('media_id'),
+                    func.row_number().over(order_by=(order_date.desc().nulls_last(), MediaFile.id.desc())).label('position')).where(
+        MediaFile.workspace_id == media.workspace_id, MediaFile.deleted_at.is_(None),
+        MediaFile.media_type.in_([MediaType.IMAGE, MediaType.VIDEO])).subquery()
+    position = db.scalar(select(ranked.c.position).where(ranked.c.media_id == media_id))
+    return {"workspace_id": media.workspace_id, "offset": max(0, position - 1)}
+
+
 @router.get("/media-library", response_model=ContentLibraryResponse)
 def content_media_library(
     user: Annotated[User, Depends(require_content_access)],
