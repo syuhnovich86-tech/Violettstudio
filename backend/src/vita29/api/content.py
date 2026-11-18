@@ -151,6 +151,13 @@ class ArchiveReuseRequest(BaseModel):
     platforms: list[PublicationPlatform] = Field(min_length=1, max_length=7)
     platform_formats: dict[PublicationPlatform, str | list[str]] = Field(default_factory=dict)
 
+    @field_validator("platforms")
+    @classmethod
+    def no_vk_publication(cls, value):
+        if PublicationPlatform.VK in value:
+            raise ValueError("Публикация во ВКонтакте отключена")
+        return value
+
     @field_validator("platform_formats")
     @classmethod
     def valid_platform_formats(cls, value):
@@ -177,6 +184,8 @@ class ContentItemCreate(BaseModel):
     @field_validator("platforms")
     @classmethod
     def unique_platforms(cls, value: list[PublicationPlatform]) -> list[PublicationPlatform]:
+        if PublicationPlatform.VK in value:
+            raise ValueError("Публикация во ВКонтакте отключена")
         return list(dict.fromkeys(value))
 
     @field_validator("platform_formats")
@@ -207,6 +216,8 @@ class ContentItemUpdate(BaseModel):
     @field_validator("platforms")
     @classmethod
     def unique_platforms(cls, value: list[PublicationPlatform] | None) -> list[PublicationPlatform] | None:
+        if value and PublicationPlatform.VK in value:
+            raise ValueError("Публикация во ВКонтакте отключена")
         return list(dict.fromkeys(value)) if value else value
 
     @field_validator("platform_formats")

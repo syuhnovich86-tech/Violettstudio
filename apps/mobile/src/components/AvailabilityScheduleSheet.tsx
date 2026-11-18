@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Alert, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { Alert, Platform, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { apiRequest } from '../api/client';
 import { PrimaryButton, Sheet } from './Common';
 import { colors } from '../theme';
@@ -7,7 +7,7 @@ import { colors } from '../theme';
 type Staff = {staff_id:number; staff_name:string};
 type Schedule = {staff_id:number;enabled:boolean;frequency:'daily'|'weekly';weekdays:number[];time_local:string;publish_new:boolean;targets:Record<string,'post'|'story'>;next_publication_at:string|null;last_error:string|null;busy:boolean};
 const days=['Пн','Вт','Ср','Чт','Пт','Сб','Вс'];
-const platforms=[['telegram','Telegram'],['instagram','Instagram'],['max','MAX'],['vk','ВКонтакте'],['threads','Threads']] as const;
+const platforms=[['telegram','Telegram'],['instagram','Instagram'],['max','MAX'],...(Platform.OS === 'ios' ? [['vk','ВКонтакте'] as const] : []),['threads','Threads']] as const;
 const defaults=(id:number):Schedule=>({staff_id:id,enabled:false,frequency:'daily',weekdays:[0,1,2,3,4],time_local:'10:00',publish_new:false,targets:{},next_publication_at:null,last_error:null,busy:false});
 
 export function AvailabilityScheduleSheet({visible,onClose,onCreateOnce}:{visible:boolean;onClose:()=>void;onCreateOnce?:()=>void}){

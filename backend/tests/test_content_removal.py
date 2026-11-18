@@ -55,16 +55,22 @@ def test_archive_copy_uses_requested_platform_formats(client, tmp_path, auth):
             ContentPublication.status == PublicationStatus.PUBLISHED))
         source_id = source.id
     path = f"/api/v1/content/archive/{source_id}/reuse"
-    payload = {"platforms": ["instagram", "telegram", "telegram_studio", "whatsapp_studio", "max", "vk", "threads"],
+    payload = {"platforms": ["instagram", "telegram", "telegram_studio", "whatsapp_studio", "max", "threads"],
                "platform_formats": {"instagram": "story", "telegram": "post", "max": "story"}}
     response = client.post(path, headers=headers, json=payload)
     assert response.status_code == 201, response.text
     assert {(p["platform"], p["publication_format"]) for p in response.json()["publications"]} == {
         ("instagram", "story"), ("telegram", "post"), ("telegram_studio", "story"),
-        ("whatsapp_studio", "story"), ("max", "story"), ("vk", "post"), ("threads", "post")}
+        ("whatsapp_studio", "story"), ("max", "story"), ("threads", "post")}
     assert response.json()["id"] != item_id
     assert client.post(path, headers=headers, json={"platforms": ["vk"],
         "platform_formats": {"vk": "story"}}).status_code == 422
+    assert client.post(path, headers=headers, json={"platforms": ["vk"]}).status_code == 422
+    assert client.patch(f"/api/v1/content/items/{item_id}", headers=headers,
+                        json={"platforms": ["vk"]}).status_code == 422
+    assert client.post('/api/v1/content/items', headers=headers, json={
+        'title': 'Проверка', 'scheduled_at': (utc_now() + timedelta(days=1)).isoformat(),
+        'platforms': ['vk']}).status_code == 422
     assert client.post(path, headers=headers, json={"platforms": ["whatsapp_studio"],
         "platform_formats": {"whatsapp_studio": "post"}}).status_code == 422
 

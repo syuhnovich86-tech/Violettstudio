@@ -34,7 +34,7 @@ class ScheduleInput(BaseModel):
     @field_validator('targets')
     @classmethod
     def valid_targets(cls, targets):
-        if not targets or not set(targets).issubset({'telegram', 'instagram', 'max', 'vk', 'threads'}):
+        if not targets or not set(targets).issubset({'telegram', 'instagram', 'max', 'threads'}):
             raise ValueError('Выберите площадку')
         if any(targets.get(name) == 'story' for name in ('vk', 'threads')):
             raise ValueError('Для этой площадки поддерживается только пост')

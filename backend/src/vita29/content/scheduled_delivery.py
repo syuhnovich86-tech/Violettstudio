@@ -41,6 +41,8 @@ def content_hash(item, publication):
 
 
 def validate_media(db, item, publication, user):
+    if publication.platform == PublicationPlatform.VK:
+        raise ValueError("Публикация во ВКонтакте отключена")
     try:
         ids = json.loads(publication.media_ids_json)
     except (TypeError, ValueError):

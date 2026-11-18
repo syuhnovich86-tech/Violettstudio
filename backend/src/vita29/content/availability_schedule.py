@@ -57,6 +57,8 @@ def _create_publication(db, schedule, user, mapping, mappings, slots, settings, 
     template = template_for_staff(db, mapping.staff_id, mappings)
     rendered = render_availability_image(db, settings, item, template, slots, user.id)
     for platform, kind in json.loads(schedule.targets_json).items():
+        if platform == 'vk':
+            continue
         db.add(ContentPublication(content_item_id=item.id, platform=PublicationPlatform(platform),
             publication_format=kind, caption='Ближайшие свободные окна — актуально на момент публикации. Напишите нам, чтобы записаться 💌',
             media_ids_json=json.dumps([rendered.id])))
