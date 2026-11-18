@@ -743,6 +743,7 @@ def _overlay_brand_caption(
     instruction: str | None = None,
     copy_hint: str | None = None,
     requested_style: str | None = None,
+    prompt_only: bool = False,
 ) -> bytes:
     """Add reliable readable Russian branding after image generation.
 
@@ -761,7 +762,8 @@ def _overlay_brand_caption(
     # background in the opposite colour family.
     image = _brand_visual_canvas(source_image, style)
     draw = ImageDraw.Draw(image, "RGBA")
-    _draw_brand_lockup(draw, 52, 46, style=style)
+    if not prompt_only:
+        _draw_brand_lockup(draw, 52, 46, style=style)
     if style == "light":
         _draw_light_editorial_copy(draw, title, instruction, copy_hint)
     else:
@@ -813,6 +815,7 @@ def _brand_visual_canvas(source: Image.Image, style: str) -> Image.Image:
 def _before_after_collage(
     source_media: list[MediaFile], settings: Settings, title: str,
     instruction: str | None = None, copy_hint: str | None = None, requested_style: str | None = None,
+    prompt_only: bool = False,
 ) -> bytes:
     """Create a real-photo collage in the dark or light VIOLETTA design family.
 
@@ -824,7 +827,8 @@ def _before_after_collage(
     canvas = Image.new("RGB", (1080, 1350), (244, 238, 230) if style == "light" else (16, 13, 11))
     draw = ImageDraw.Draw(canvas, "RGBA")
     border = _TAUPE_SOFT if style == "light" else (233, 194, 120, 255)
-    _draw_brand_lockup(draw, 50, 38, 0.82, style=style)
+    if not prompt_only:
+        _draw_brand_lockup(draw, 50, 38, 0.82, style=style)
     sources: list[Image.Image] = []
     for entry in source_media[:4]:
         with Image.open(original_path(settings, entry.storage_key)) as image:
@@ -858,7 +862,7 @@ def _before_after_collage(
             x, y, width, height = placements[index]
             _paste_rounded(canvas, image, (x, y, width, height), 14)
             draw.rounded_rectangle((x - 3, y - 3, x + width + 3, y + height + 3), radius=14, outline=border, width=3)
-            if labels[index]:
+            if labels[index] and not prompt_only:
                 draw.rounded_rectangle((x + 18, y + 18, x + 150, y + 62), radius=16, fill=(11, 9, 7, 210))
                 _draw_firm_gold_text(
                     draw, (x + 38, y + 27), labels[index], _font(22, bold=True), anchor="la", fill=_GOLD_TEXT_BRIGHT
@@ -962,8 +966,13 @@ def generate_branded_visual(
     selected_style = getattr(item, "visual_style", "auto")
     image_sources = [entry for entry in source_media if entry.media_type == MediaType.IMAGE][:16]
     native_visuals = config_value(settings, 'openai_native_visuals', 'true').casefold() != 'false'
-    collage_requested = _wants_collage(item.title, instruction)
-    before_after = bool(re.search(r'до\s*(?:(?:и|/|—|-)\s*)?после', f'{item.title}\n{instruction}'.casefold()))
+    visual_title = "" if item.no_title_on_image else item.title
+    if item.no_title_on_image:
+        copy_hint = None
+        if not instruction.strip():
+            raise ContentAgentError("Укажите в поле «Пожелания к публикации», что должно быть на изображении.")
+    collage_requested = _wants_collage(visual_title, instruction)
+    before_after = bool(re.search(r'до\s*(?:(?:и|/|—|-)\s*)?после', f'{visual_title}\n{instruction}'.casefold()))
     # The order selected in the archive is meaningful: for two photos it is
     # "before" then "after". Render this locally so the client result is never
     # invented or mixed by an image model.
@@ -971,7 +980,7 @@ def generate_branded_visual(
         return _save_generated_image(
             db, settings, item, actor_id, instruction,
             _before_after_collage(
-                image_sources, settings, item.title, instruction, copy_hint, requested_style=selected_style,
+                image_sources, settings, visual_title, instruction, copy_hint, requested_style=selected_style, prompt_only=item.no_title_on_image,
             ),
         )
     api_key = read_openai_secret(settings)
@@ -981,10 +990,15 @@ def generate_branded_visual(
     # Several selected source photos are intentionally treated as a collage as
     # well: the content agent made that selection specifically for one merged
     # publication visual. A single selected photo remains a normal edit.
-    prompt = (_native_visual_prompt(item.title, instruction, has_source=bool(image_sources), force_edit=force_edit,
-                                   style=_visual_style(item.title, instruction, collage=collage_requested, requested_style=selected_style), copy_hint=copy_hint, source_count=len(image_sources))
-              if native_visuals else _visual_prompt(item.title, instruction, bool(image_sources),
+    prompt = (_native_visual_prompt(visual_title, instruction, has_source=bool(image_sources), force_edit=force_edit,
+                                   style=_visual_style(visual_title, instruction, collage=collage_requested, requested_style=selected_style), copy_hint=copy_hint, source_count=len(image_sources))
+              if native_visuals else _visual_prompt(visual_title, instruction, bool(image_sources),
                   collage=collage_requested or len(image_sources) >= 2, requested_style=selected_style))
+    if item.no_title_on_image:
+        prompt = ("Create or edit the requested image using only the following user brief. "
+                  "Use only text explicitly requested in the brief; do not invent headings, labels, logos or slogans. "
+                  "Preserve the identity and procedure result of any supplied photographs. "
+                  "Write the abbreviation for permanent makeup as ПМ.\nUser brief: " + instruction)
     detailed_model = image_model.startswith(('gpt-image-2.5', 'gpt-image-2.6'))
     image_options = {'model': image_model, 'prompt': prompt, 'size': '1024x1536',
                      'quality': 'xhigh' if native_visuals and detailed_model else 'high',
@@ -1026,5 +1040,5 @@ def generate_branded_visual(
             raise ContentAgentError('Модель вернула повреждённое изображение. Повторите попытку.') from error
         final_image = raw_image
     else:
-        final_image = _overlay_brand_caption(raw_image, item.title, instruction, copy_hint, requested_style=selected_style)
+        final_image = _overlay_brand_caption(raw_image, visual_title, instruction, copy_hint, requested_style=selected_style, prompt_only=item.no_title_on_image)
     return _save_generated_image(db, settings, item, actor_id, instruction, final_image)

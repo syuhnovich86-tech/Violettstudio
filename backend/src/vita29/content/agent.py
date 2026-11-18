@@ -623,6 +623,10 @@ def prepare_telegram_draft(
         },
         "required": ["caption", "selected_media"],
     }
+    if item.no_caption:
+        schema["properties"].pop("caption")
+        schema["required"].remove("caption")
+        system += " Не создавай и не возвращай подпись к публикации; выбери только подходящие материалы."
     body = {
         "model": content_model(settings),
         "input": [
@@ -669,9 +673,9 @@ def prepare_telegram_draft(
         output = json.loads(_response_text(response.json()))
     except (httpx.HTTPError, json.JSONDecodeError, TypeError, ValueError) as error:
         raise ContentAgentError("The content agent could not prepare a draft. Try again later.") from error
-    caption = str(output.get("caption", "")).strip()
+    caption = "" if item.no_caption else str(output.get("caption", "")).strip()
     selected_media = output.get("selected_media", [])
-    if not caption or len(caption) > 4000:
+    if not item.no_caption and (not caption or len(caption) > 4000):
         raise ContentAgentError("The content agent returned an invalid caption")
     if not isinstance(selected_media, list) or len(selected_media) > item.media_limit:
         raise ContentAgentError("The content agent selected an invalid number of files")

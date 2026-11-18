@@ -66,6 +66,7 @@ function VoiceField({ target, label, value, onChangeText, placeholder, multiline
   const anotherFieldIsListening = activeTarget !== null && !listening;
   return <View style={styles.voiceField}>
     <Field label={label} value={value} onChangeText={onChangeText} placeholder={placeholder} multiline={multiline} />
+    {target === 'instruction' && <Pressable accessibilityRole="button" accessibilityLabel="Правила генерации" onPress={() => Alert.alert('Правила генерации', "Расскажите, что нужно создать или изменить: укажите тему, стиль, цвета и важные детали. Если нужны слова на изображении, напишите их точно, например: «Надпись: Запись открыта». Укажите, какие фото использовать и что на них изменить. Галочка «Не включать название в изображение» исключает название карточки; надписи из пожеланий остаются. Галочка «Без подписи под публикацией» отключает текст под публикацией, но не надписи на картинке. Проверьте результат перед публикацией: ИИ может ошибаться в тексте и деталях. Изменения применяются при следующей генерации.")}><Text style={styles.voiceButtonText}>? Правила генерации</Text></Pressable>}
     <Pressable accessibilityRole="button" accessibilityLabel={listening ? `Остановить голосовой ввод: ${label}` : `Надиктовать: ${label}`} disabled={disabled || anotherFieldIsListening} onPress={() => onToggle(target)} style={({ pressed }) => [styles.voiceButton, listening && styles.voiceButtonActive, (pressed || disabled || anotherFieldIsListening) && styles.voiceButtonDisabled]}>
       <Ionicons name={listening ? 'stop' : 'mic-outline'} size={17} color={listening ? colors.white : colors.ink} />
       <Text style={[styles.voiceButtonText, listening && styles.voiceButtonTextActive]}>{listening ? 'Стоп · слушаю' : 'Надиктовать'}</Text>
@@ -114,6 +115,8 @@ export function ContentScreen({ navigation, route }: BottomTabScreenProps<RootTa
   const [dateCursor, setDateCursor] = useState(() => new Date());
   const [title, setTitle] = useState('');
   const [caption, setCaption] = useState('');
+  const [noCaption, setNoCaption] = useState(false);
+  const [noTitleOnImage, setNoTitleOnImage] = useState(false);
   const [instruction, setInstruction] = useState('');
   const [date, setDate] = useState(() => isoDate(new Date()));
   const [time, setTime] = useState('12:00');
@@ -225,7 +228,7 @@ export function ContentScreen({ navigation, route }: BottomTabScreenProps<RootTa
       setVoiceError('Микрофон уже занят или распознавание временно недоступно.');
     }
   }
-  function resetForm() { cancelVoiceInput(); setTitle(''); setCaption(''); setInstruction(''); setDate(isoDate(new Date())); setTime('12:00'); setDateAssigned(false); setDateOpen(false); setMediaFolder(null); setFormat('post'); setAvailabilityStaff(null); setPlatforms((Platform.OS === 'android' || Platform.OS === 'ios') ? [] : ['telegram']); setPlatformFormats({ telegram: 'post', instagram: 'post', max: 'post', vk: 'post' }); setMediaIds([]); setMediaLimit(1); setMediaTypes({}); setEditPhoto(false); }
+  function resetForm() { cancelVoiceInput(); setTitle(''); setCaption(''); setNoCaption(false); setNoTitleOnImage(false); setInstruction(''); setDate(isoDate(new Date())); setTime('12:00'); setDateAssigned(false); setDateOpen(false); setMediaFolder(null); setFormat('post'); setAvailabilityStaff(null); setPlatforms((Platform.OS === 'android' || Platform.OS === 'ios') ? [] : ['telegram']); setPlatformFormats({ telegram: 'post', instagram: 'post', max: 'post', vk: 'post' }); setMediaIds([]); setMediaLimit(1); setMediaTypes({}); setEditPhoto(false); }
   useEffect(() => {
     const source = route.params?.sourceMedia;
     if (!source || !user?.can_access_content) return;
@@ -258,7 +261,7 @@ export function ContentScreen({ navigation, route }: BottomTabScreenProps<RootTa
       let created: ContentItem | undefined;
       try {
         setBusy(true);
-        created = await createContent({ title: `${staff.staff_name} — свободные окна`, scheduled_at: scheduled.toISOString(), publication_date_assigned: dateAssigned, platforms, platform_formats: Object.fromEntries(platforms.map((platform) => [platform, (platform === 'telegram_studio' || platform === 'whatsapp_studio') ? 'story' : platform === 'instagram' ? platformFormats.instagram : (Platform.OS === 'android' || Platform.OS === 'ios') && (platform === 'telegram' || platform === 'max') ? platformFormats[platform] : 'post'])), media_ids: [], content_format: 'availability', media_limit: 1, availability_staff_id: staff.staff_id });
+        created = await createContent({ title: `${staff.staff_name} — свободные окна`, no_caption: noCaption, scheduled_at: scheduled.toISOString(), publication_date_assigned: dateAssigned, platforms, platform_formats: Object.fromEntries(platforms.map((platform) => [platform, (platform === 'telegram_studio' || platform === 'whatsapp_studio') ? 'story' : platform === 'instagram' ? platformFormats.instagram : (Platform.OS === 'android' || Platform.OS === 'ios') && (platform === 'telegram' || platform === 'max') ? platformFormats[platform] : 'post'])), media_ids: [], content_format: 'availability', media_limit: 1, availability_staff_id: staff.staff_id });
         setCreateOpen(false); openItem(created); setWeek(monday(new Date(created.scheduled_at)));
         const prepared = await prepareContent(created.id);
         setActive(prepared); setCaption(prepared.publications.find((publication) => publication.caption)?.caption ?? prepared.caption ?? '');
@@ -269,13 +272,13 @@ export function ContentScreen({ navigation, route }: BottomTabScreenProps<RootTa
     }
     if (title.trim().length < 2 || !platforms.length || !validatePhotoSelection()) return;
     if (!editPhoto) {
-      await mutate(async () => { const created = await createContent({ title: title.trim(), caption: caption.trim() || null, editor_instruction: instruction.trim() || null, visual_edit_requested: false, scheduled_at: scheduled.toISOString(), publication_date_assigned: dateAssigned, platforms, platform_formats: Object.fromEntries(platforms.map((platform) => [platform, (platform === 'telegram_studio' || platform === 'whatsapp_studio') ? 'story' : platform === 'instagram' ? platformFormats.instagram : (Platform.OS === 'android' || Platform.OS === 'ios') && (platform === 'telegram' || platform === 'max') ? platformFormats[platform] : 'post'])), media_ids: mediaIds, content_format: format, media_limit: Math.max(mediaLimit, mediaIds.length) }); setWeek(monday(new Date(created.scheduled_at))); setCreateOpen(false); resetForm(); }, 'Элемент добавлен в контент-план');
+      await mutate(async () => { const created = await createContent({ title: title.trim(), caption: caption.trim() || null, no_caption: noCaption, no_title_on_image: noTitleOnImage, editor_instruction: instruction.trim() || null, visual_edit_requested: false, scheduled_at: scheduled.toISOString(), publication_date_assigned: dateAssigned, platforms, platform_formats: Object.fromEntries(platforms.map((platform) => [platform, (platform === 'telegram_studio' || platform === 'whatsapp_studio') ? 'story' : platform === 'instagram' ? platformFormats.instagram : (Platform.OS === 'android' || Platform.OS === 'ios') && (platform === 'telegram' || platform === 'max') ? platformFormats[platform] : 'post'])), media_ids: mediaIds, content_format: format, media_limit: Math.max(mediaLimit, mediaIds.length) }); setWeek(monday(new Date(created.scheduled_at))); setCreateOpen(false); resetForm(); }, 'Элемент добавлен в контент-план');
       return;
     }
     let created: ContentItem | undefined;
     try {
       setBusy(true);
-      created = await createContent({ title: title.trim(), caption: caption.trim() || null, editor_instruction: instruction.trim() || null, visual_edit_requested: true, scheduled_at: scheduled.toISOString(), publication_date_assigned: dateAssigned, platforms, platform_formats: Object.fromEntries(platforms.map((platform) => [platform, (platform === 'telegram_studio' || platform === 'whatsapp_studio') ? 'story' : platform === 'instagram' ? platformFormats.instagram : (Platform.OS === 'android' || Platform.OS === 'ios') && (platform === 'telegram' || platform === 'max') ? platformFormats[platform] : 'post'])), media_ids: mediaIds, content_format: format, media_limit: Math.max(1, mediaIds.length) });
+      created = await createContent({ title: title.trim(), caption: caption.trim() || null, no_caption: noCaption, no_title_on_image: noTitleOnImage, editor_instruction: instruction.trim() || null, visual_edit_requested: true, scheduled_at: scheduled.toISOString(), publication_date_assigned: dateAssigned, platforms, platform_formats: Object.fromEntries(platforms.map((platform) => [platform, (platform === 'telegram_studio' || platform === 'whatsapp_studio') ? 'story' : platform === 'instagram' ? platformFormats.instagram : (Platform.OS === 'android' || Platform.OS === 'ios') && (platform === 'telegram' || platform === 'max') ? platformFormats[platform] : 'post'])), media_ids: mediaIds, content_format: format, media_limit: Math.max(1, mediaIds.length) });
       setCreateOpen(false); cancelVoiceInput(); openItem(created); setWeek(monday(new Date(created.scheduled_at)));
       const prepared = await prepareContent(created.id);
       setActive(prepared);
@@ -308,7 +311,7 @@ export function ContentScreen({ navigation, route }: BottomTabScreenProps<RootTa
       }
     }, start ? 'Все материалы плана поставлены в расписание.' : dayPlan ? 'План на день создан' : 'Недельный план создан');
   }
-  function openItem(item: ContentItem) { const scheduled = new Date(item.scheduled_at); setActive(item); setTitle(item.title); setCaption(item.publications.find((publication) => publication.caption)?.caption ?? item.caption ?? ''); setInstruction(item.editor_instruction ?? ''); setDate(isoDate(scheduled)); setTime(isoTime(scheduled)); setDateAssigned(item.publication_date_assigned ?? true); setMediaIds(item.media_ids); setMediaLimit(item.media_limit); setMediaTypes({}); setEditPhoto(!!item.visual_edit_requested); }
+  function openItem(item: ContentItem) { const scheduled = new Date(item.scheduled_at); setActive(item); setTitle(item.title); setNoCaption(!!item.no_caption); setNoTitleOnImage(!!item.no_title_on_image); setCaption(item.publications.find((publication) => publication.caption)?.caption ?? item.caption ?? ''); setInstruction(item.editor_instruction ?? ''); setDate(isoDate(scheduled)); setTime(isoTime(scheduled)); setDateAssigned(item.publication_date_assigned ?? true); setMediaIds(item.media_ids); setMediaLimit(item.media_limit); setMediaTypes({}); setEditPhoto(!!item.visual_edit_requested); }
   async function reuseArchived() {
     if (!archiveSelected || !archiveTargets.length) return;
     await mutate(async () => {
@@ -321,9 +324,9 @@ export function ContentScreen({ navigation, route }: BottomTabScreenProps<RootTa
     if (dateAssigned && !scheduled) throw new Error('Проверьте дату и время: введите время в формате ЧЧ:ММ.');
     const original = new Date(item.scheduled_at);
     const scheduleChanged = dateAssigned && (date !== isoDate(original) || time !== isoTime(original) || item.publication_date_assigned === false);
-    let result = await updateContent(item.id, { title: title.trim(), caption: caption.trim() || null, editor_instruction: instruction.trim() || null, visual_edit_requested: editPhoto, publication_date_assigned: dateAssigned, ...(scheduleChanged && scheduled ? { scheduled_at: scheduled.toISOString() } : {}), media_ids: mediaIds, media_limit: Math.max(mediaLimit, mediaIds.length, 1) });
+    let result = await updateContent(item.id, { title: title.trim(), caption: caption.trim() || null, no_caption: noCaption, no_title_on_image: noTitleOnImage, editor_instruction: instruction.trim() || null, visual_edit_requested: editPhoto, publication_date_assigned: dateAssigned, ...(scheduleChanged && scheduled ? { scheduled_at: scheduled.toISOString() } : {}), media_ids: mediaIds, media_limit: Math.max(mediaLimit, mediaIds.length, 1) });
     const previousCaption = item.publications.find((publication) => publication.caption)?.caption ?? item.caption ?? '';
-    if (previousCaption !== caption.trim()) {
+    if (!noCaption && previousCaption !== caption.trim()) {
       for (const publication of result.publications) {
         if (publication.status !== 'published' && (publication.caption ?? '') !== caption.trim()) result = await updatePublicationCaption(item.id, publication.platform, caption.trim() || null, publication.id);
       }
@@ -341,7 +344,7 @@ export function ContentScreen({ navigation, route }: BottomTabScreenProps<RootTa
   }
   async function publishNow() {
     if (!active || dateAssigned || !validatePhotoSelection()) return;
-    if (!caption.trim()) { Alert.alert('Добавьте текст', 'Сначала подготовьте подпись к публикации.'); return; }
+    if (!noCaption && !caption.trim()) { Alert.alert('Добавьте текст', 'Сначала подготовьте подпись к публикации.'); return; }
     try {
       setBusy(true);
       await persistItem(active);
@@ -365,14 +368,14 @@ export function ContentScreen({ navigation, route }: BottomTabScreenProps<RootTa
       const isReel = active.publications.some((publication) => publication.platform === 'instagram' && publication.publication_format === 'reel');
       const wantsCollage = /кол+аж|калаж|нескольк\p{L}*(?:\s+\S+){0,3}\s+(?:фото|снимк|кадр)/iu.test(`${title}\n${instruction}`);
       const isStorySeries = !wantsCollage && mediaIds.length > 1 && active.publications.some((publication) => (publication.platform === 'instagram' || ((Platform.OS === 'android' || Platform.OS === 'ios') && (publication.platform === 'telegram' || publication.platform === 'telegram_studio' || publication.platform === 'whatsapp_studio' || publication.platform === 'max'))) && publication.publication_format === 'story');
-      const generationInstruction = editPhoto || isReel || isStorySeries ? instruction.trim() : instruction.includes(visualRequest) ? instruction.trim() : [instruction.trim().slice(0, 1000 - visualRequest.length - 1), visualRequest].filter(Boolean).join('\n');
+      const generationInstruction = noTitleOnImage || editPhoto || isReel || isStorySeries ? instruction.trim() : instruction.includes(visualRequest) ? instruction.trim() : [instruction.trim().slice(0, 1000 - visualRequest.length - 1), visualRequest].filter(Boolean).join('\n');
       const scheduled = dateAssigned ? scheduledDate(date, time) : null;
       if (dateAssigned && !scheduled) throw new Error('Проверьте дату и время: введите время в формате ЧЧ:ММ.');
       const original = new Date(active.scheduled_at);
       const scheduleChanged = dateAssigned && (date !== isoDate(original) || time !== isoTime(original) || active.publication_date_assigned === false);
-      await updateContent(active.id, { title: title.trim(), caption: caption.trim() || null, editor_instruction: generationInstruction || null, visual_edit_requested: editPhoto, publication_date_assigned: dateAssigned, ...(scheduleChanged && scheduled ? { scheduled_at: scheduled.toISOString() } : {}), media_ids: mediaIds, media_limit: Math.max(1, active.media_limit, mediaIds.length) });
+      await updateContent(active.id, { title: title.trim(), caption: caption.trim() || null, no_caption: noCaption, no_title_on_image: noTitleOnImage, editor_instruction: generationInstruction || null, visual_edit_requested: editPhoto, publication_date_assigned: dateAssigned, ...(scheduleChanged && scheduled ? { scheduled_at: scheduled.toISOString() } : {}), media_ids: mediaIds, media_limit: Math.max(1, active.media_limit, mediaIds.length) });
       setInstruction(generationInstruction);
-      const result = await prepareContent(active.id);
+      const result = await prepareContent(active.id, true);
       setCaption(result.publications.find((publication) => publication.caption)?.caption ?? result.caption ?? '');
       setDate(isoDate(new Date(result.scheduled_at)));
       setTime(isoTime(new Date(result.scheduled_at)));
@@ -448,8 +451,9 @@ export function ContentScreen({ navigation, route }: BottomTabScreenProps<RootTa
       <Text style={styles.voiceHint}>* Обязательно для создания. Дата, подпись и уточнения заполняются при необходимости.</Text>
       {format === 'availability' ? <><Text style={styles.label}>Мастер для свободных окон *</Text>{availabilityOptions.isLoading ? <Busy label="Загружаю мастеров…" /> : availabilityOptions.error ? <ErrorState message={(availabilityOptions.error as Error).message} onRetry={() => void availabilityOptions.refetch()} /> : availabilityOptions.data?.length ? <View style={styles.options}>{availabilityOptions.data.map((staff) => <Pressable accessibilityRole="button" key={staff.staff_id} style={[styles.option, availabilityStaff === staff.staff_id && styles.optionActive]} onPress={() => setAvailabilityStaff(staff.staff_id)}><Text style={styles.optionText}>{staff.staff_name}</Text></Pressable>)}</View> : <Text style={styles.voiceHint}>Нет мастеров с настроенным шаблоном. Проверьте шаблоны в веб-версии.</Text>}<Text style={styles.voiceHint}>Окна из YCLIENTS будут размещены на фирменном шаблоне выбранного мастера.</Text></> : null}
       {format !== 'availability' ? <VoiceField target="title" label="Название записи *" value={title} onChangeText={setTitle} placeholder="Например, результат процедуры до/после" activeTarget={voiceTarget} disabled={busy} onToggle={(target) => void toggleVoiceInput(target)} /> : null}
-      {format !== 'availability' ? <Field label="Подпись" value={caption} onChangeText={setCaption} placeholder="Текст публикации" multiline /> : null}
-      {format !== 'availability' ? <VoiceField target="instruction" label={editPhoto ? 'Что изменить на фото' : 'Уточнения для генерации'} value={instruction} onChangeText={setInstruction} placeholder={editPhoto ? 'Например: убери маску, добавь чёрные перчатки, мягкую ретушь, золотую надпись и логотип VIOLETTA' : 'Например: тёмная золотая стилистика, акцент на результате'} multiline activeTarget={voiceTarget} disabled={busy} onToggle={(target) => void toggleVoiceInput(target)} /> : null}
+      <View style={styles.scheduleToggle}><View style={styles.flex}><Text style={styles.label}>Без подписи под публикацией</Text><Text style={styles.voiceHint}>Подпись не создаётся и не отправляется.</Text></View><Switch accessibilityLabel="Без подписи под публикацией" value={noCaption} disabled={busy} onValueChange={setNoCaption} /></View>{format !== 'availability' ? <View style={styles.scheduleToggle}><View style={styles.flex}><Text style={styles.label}>Не включать название в изображение</Text><Text style={styles.voiceHint}>Надписи из пожеланий сохраняются. Действует при следующей генерации.</Text></View><Switch accessibilityLabel="Не включать название в изображение" value={noTitleOnImage} disabled={busy} onValueChange={setNoTitleOnImage} /></View> : null}
+      {format !== 'availability' && !noCaption ? <Field label="Подпись" value={caption} onChangeText={setCaption} placeholder="Текст публикации" multiline /> : null}
+      {format !== 'availability' ? <VoiceField target="instruction" label="Пожелания к публикации" value={instruction} onChangeText={setInstruction} placeholder={editPhoto ? 'Например: убери маску, добавь чёрные перчатки, мягкую ретушь, золотую надпись и логотип VIOLETTA' : 'Например: тёмная золотая стилистика, акцент на результате'} multiline activeTarget={voiceTarget} disabled={busy} onToggle={(target) => void toggleVoiceInput(target)} /> : null}
       {format !== 'availability' ? (voiceError ? <Text style={styles.voiceError}>{voiceError}</Text> : <Text style={styles.voiceHint}>Распознавание запускается только после нажатия на микрофон и дополняет введённый текст.</Text>) : null}
       {dateControls(false, format === 'availability')}
 
@@ -482,8 +486,9 @@ export function ContentScreen({ navigation, route }: BottomTabScreenProps<RootTa
       {active ? <><View style={styles.activeHeading}><View style={styles.status}><View style={styles.statusDot} /><Text style={styles.statusText}>{statusLabels[active.status] ?? active.status}</Text></View><Text style={styles.activeDate}>{active.publication_date_assigned === false ? 'Дата не назначена' : new Date(active.scheduled_at).toLocaleString('ru-RU')}</Text></View>
         {(Platform.OS === 'android' || Platform.OS === 'ios') && active.content_format === 'availability' ? <Text style={styles.label}>Мастер: {availabilityOptions.data?.find((staff) => staff.staff_id === active.availability_staff_id)?.staff_name ?? active.title.replace(/\s*—\s*свободные окна$/i, '')}</Text> : <>
           <VoiceField target="title" label="Название записи *" value={title} onChangeText={setTitle} activeTarget={voiceTarget} disabled={busy} onToggle={(target) => void toggleVoiceInput(target)} />
-          <Field label="Подпись" value={caption} onChangeText={setCaption} multiline />
-          <VoiceField target="instruction" label={editPhoto ? 'Что изменить на фото' : 'Уточнения для генерации'} value={instruction} onChangeText={setInstruction} placeholder={editPhoto ? 'Например: мягкая ретушь, золотая надпись и логотип VIOLETTA' : undefined} multiline activeTarget={voiceTarget} disabled={busy} onToggle={(target) => void toggleVoiceInput(target)} />
+          <View style={styles.scheduleToggle}><View style={styles.flex}><Text style={styles.label}>Без подписи под публикацией</Text><Text style={styles.voiceHint}>Подпись не создаётся и не отправляется.</Text></View><Switch accessibilityLabel="Без подписи под публикацией" value={noCaption} disabled={busy} onValueChange={setNoCaption} /></View>{active.content_format !== 'availability' ? <View style={styles.scheduleToggle}><View style={styles.flex}><Text style={styles.label}>Не включать название в изображение</Text><Text style={styles.voiceHint}>Надписи из пожеланий сохраняются. Действует при следующей генерации.</Text></View><Switch accessibilityLabel="Не включать название в изображение" value={noTitleOnImage} disabled={busy} onValueChange={setNoTitleOnImage} /></View> : null}
+          {!noCaption ? <Field label="Подпись" value={caption} onChangeText={setCaption} multiline /> : null}
+          <VoiceField target="instruction" label="Пожелания к публикации" value={instruction} onChangeText={setInstruction} placeholder={editPhoto ? 'Например: мягкая ретушь, золотая надпись и логотип VIOLETTA' : undefined} multiline activeTarget={voiceTarget} disabled={busy} onToggle={(target) => void toggleVoiceInput(target)} />
           {voiceError ? <Text style={styles.voiceError}>{voiceError}</Text> : <Text style={styles.voiceHint}>Надиктованный текст добавляется к текущему содержимому поля.</Text>}
           {(Platform.OS === 'android' || Platform.OS === 'ios') ? <><PrimaryButton title={active.status === 'ready' ? 'Сгенерировать заново' : editPhoto ? 'Обработать фото и подготовить текст' : 'Сгенерировать текст и изображение'} icon="refresh-outline" onPress={() => void generate()} disabled={busy || generationUncertain || title.trim().length < 2 || !['draft', 'review', 'approved', 'failed', 'ready'].includes(active.status) || active.publications.some((publication) => ['published', 'publishing'].includes(publication.status))} />{active.status === 'scheduled' ? <Text style={styles.voiceHint}>Публикация уже запланирована. Для новой версии создайте отдельную публикацию.</Text> : active.publications.some((publication) => ['published', 'publishing'].includes(publication.status)) ? <Text style={styles.voiceHint}>Уже размещённую публикацию можно повторно создать из архива.</Text> : null}</> : null}
         </>}

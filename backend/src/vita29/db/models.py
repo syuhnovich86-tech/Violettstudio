@@ -487,6 +487,8 @@ class ContentItem(Base):
     # Removing a card from the plan must not erase confirmed/uncertain deliveries.
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    no_caption: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    no_title_on_image: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     editor_instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
     # This is deliberately separate from the editor note.  An instruction
     # such as "убери маску" must invoke image editing when the editor has

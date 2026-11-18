@@ -78,6 +78,8 @@ class ContentItemResponse(BaseModel):
     id: str
     title: str
     caption: str | None
+    no_caption: bool
+    no_title_on_image: bool
     editor_instruction: str | None
     visual_edit_requested: bool
     visual_style: Literal["auto", "light", "dark"]
@@ -150,6 +152,8 @@ class ArchiveReuseRequest(BaseModel):
 class ContentItemCreate(BaseModel):
     title: str = Field(min_length=2, max_length=180)
     caption: str | None = Field(default=None, max_length=5000)
+    no_caption: bool = False
+    no_title_on_image: bool = False
     editor_instruction: str | None = Field(default=None, max_length=1000)
     visual_edit_requested: bool = False
     visual_style: Literal["auto", "light", "dark"] = "auto"
@@ -176,6 +180,8 @@ class ContentItemCreate(BaseModel):
 class ContentItemUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=2, max_length=180)
     caption: str | None = Field(default=None, max_length=5000)
+    no_caption: bool | None = None
+    no_title_on_image: bool | None = None
     editor_instruction: str | None = Field(default=None, max_length=1000)
     visual_edit_requested: bool | None = None
     visual_style: Literal["auto", "light", "dark"] | None = None
@@ -466,6 +472,8 @@ def response_for(db: Session, item: ContentItem) -> ContentItemResponse:
         id=item.id,
         title=item.title,
         caption=item.caption,
+        no_caption=item.no_caption,
+        no_title_on_image=item.no_title_on_image,
         editor_instruction=item.editor_instruction,
         visual_edit_requested=item.visual_edit_requested,
         visual_style=item.visual_style,
@@ -793,7 +801,7 @@ def reuse_archived_publication(
         media_ids.append(restored.id)
     caption = source.caption or original.caption
     platforms = list(dict.fromkeys(payload.platforms))
-    item = ContentItem(title=original.title, caption=caption, editor_instruction=None,
+    item = ContentItem(title=original.title, caption=caption, no_caption=original.no_caption, no_title_on_image=original.no_title_on_image, editor_instruction=None,
                        visual_edit_requested=False, visual_style=original.visual_style,
                        content_format=ContentFormat.POST, media_limit=max(1, len(media_ids)),
                        status=ContentStatus.READY, scheduled_at=utc_now(), publication_date_assigned=False,
@@ -845,6 +853,8 @@ def create_content_item(
     item = ContentItem(
         title=normalize_pm(payload.title.strip()),
         caption=payload.caption.strip() if payload.caption else None,
+        no_caption=payload.no_caption,
+        no_title_on_image=payload.no_title_on_image,
         editor_instruction=payload.editor_instruction.strip() if payload.editor_instruction else None,
         visual_edit_requested=payload.visual_edit_requested,
         visual_style=payload.visual_style,
@@ -889,6 +899,8 @@ def create_content_plan(
         item = ContentItem(
             title=normalize_pm(entry.title.strip()),
             caption=None,
+            no_caption=entry.no_caption,
+            no_title_on_image=entry.no_title_on_image,
             visual_edit_requested=entry.visual_edit_requested,
             visual_style=entry.visual_style,
             scheduled_at=scheduled_at,
@@ -927,6 +939,8 @@ def update_content_item(
         db.refresh(item)
     if changes and db.scalar(select(ContentPublication.id).where(ContentPublication.content_item_id == item.id, ContentPublication.status == PublicationStatus.PUBLISHING).limit(1)):
         raise HTTPException(status_code=409, detail="Публикация уже отправляется; дождитесь результата")
+    if any(key in changes and changes[key] is not None and changes[key] != getattr(item, key) for key in ("no_caption", "no_title_on_image")) and item.status in {ContentStatus.SCHEDULED, ContentStatus.GENERATING}:
+        raise HTTPException(status_code=409, detail="Сначала верните публикацию в черновик или дождитесь окончания генерации")
     date_flag = changes.pop("publication_date_assigned", None)
     if "scheduled_at" in changes and changes["scheduled_at"] is None:
         raise HTTPException(status_code=400, detail="Укажите дату или снимите её назначение")
@@ -947,6 +961,10 @@ def update_content_item(
         item.title = normalize_pm(changes["title"].strip())
     if "caption" in changes:
         item.caption = changes["caption"].strip() if changes["caption"] else None
+    if "no_caption" in changes and changes["no_caption"] is not None:
+        item.no_caption = changes["no_caption"]
+    if "no_title_on_image" in changes and changes["no_title_on_image"] is not None:
+        item.no_title_on_image = changes["no_title_on_image"]
     if "editor_instruction" in changes:
         next_instruction = changes["editor_instruction"].strip() if changes["editor_instruction"] else None
         item.editor_instruction = (
@@ -1099,6 +1117,7 @@ def prepare_content_item(
     _: Annotated[AuthSession, Depends(require_csrf)],
     user: Annotated[User, Depends(require_content_access)],
     db: Annotated[Session, Depends(get_db)],
+    force_visual: bool = False,
 ) -> ContentItemResponse:
     """Prepare a content draft for every selected platform; never publish it."""
     item = get_item(db, item_id)
@@ -1153,6 +1172,8 @@ def prepare_content_item(
                        and not _wants_collage(item.title, item.editor_instruction))
     if is_story_series and item.visual_edit_requested:
         raise HTTPException(status_code=422, detail="Для серии сторис сначала обработайте фотографии по отдельности, затем выберите готовые файлы.")
+    if item.no_title_on_image and item.content_format != ContentFormat.AVAILABILITY and not item.editor_instruction and not (is_instagram_reel or is_story_series) and (item.visual_edit_requested or force_visual or requires_generated_visual(item.title, item.editor_instruction)):
+        raise HTTPException(status_code=422, detail="Укажите в поле «Пожелания к публикации», что должно быть на изображении.")
     if item.content_format == ContentFormat.AVAILABILITY:
         settings = get_settings()
         integration = db.scalar(select(YclientsIntegration).where(YclientsIntegration.status == "active"))
@@ -1230,7 +1251,7 @@ def prepare_content_item(
         db.commit()
         raise HTTPException(status_code=502, detail=str(error)) from error
     for publication in publications:
-        publication.caption = draft.caption
+        publication.caption = None if item.no_caption else draft.caption
     if item.content_format == ContentFormat.AVAILABILITY:
         try:
             rendered = render_availability_image(
@@ -1245,7 +1266,7 @@ def prepare_content_item(
             raise HTTPException(status_code=502, detail=publication.error) from error
         for publication in publications:
             publication.media_ids_json = json.dumps([rendered.id])
-            publication.caption = "Ближайшие свободные окна — актуально на момент публикации. Напишите нам, чтобы записаться 💌"
+            publication.caption = None if item.no_caption else "Ближайшие свободные окна — актуально на момент публикации. Напишите нам, чтобы записаться 💌"
     else:
         # An explicit request such as "Создай рекламный пост" must reliably
         # create a campaign visual.  It used to be decided only in the React
@@ -1264,16 +1285,16 @@ def prepare_content_item(
                 status_code=422,
                 detail="Для обработки ИИ выберите хотя бы одно фото из хранилища. Видео можно добавить в пост отдельно.",
             )
-        if not (is_instagram_reel or is_story_series) and (item.visual_edit_requested or requires_generated_visual(item.title, item.editor_instruction)):
+        if not (is_instagram_reel or is_story_series) and (item.visual_edit_requested or force_visual or requires_generated_visual(item.title, item.editor_instruction)):
             try:
                 generated = generate_branded_visual(
                     db,
                     settings,
                     item,
                     user.id,
-                    item.editor_instruction or item.title,
+                    item.editor_instruction or ("" if item.no_title_on_image else item.title),
                     prepared_source_media,
-                    copy_hint=draft.caption,
+                    copy_hint=None if item.no_title_on_image else draft.caption,
                     force_edit=item.visual_edit_requested,
                 )
             except ContentAgentError as error:
@@ -1589,9 +1610,9 @@ def publish_telegram_content_item(
         )
     if item.status not in {ContentStatus.READY, ContentStatus.SCHEDULED} and not (mobile and item.status in {ContentStatus.DRAFT, ContentStatus.REVIEW, ContentStatus.APPROVED, ContentStatus.FAILED}):
         raise HTTPException(status_code=409, detail="Prepare the draft before publishing")
-    if mobile and not publication.caption and item.caption:
+    if mobile and not item.no_caption and not publication.caption and item.caption:
         publication.caption = item.caption
-    if not publication.caption:
+    if not item.no_caption and not publication.caption:
         raise HTTPException(status_code=409, detail="Telegram draft is empty")
     try:
         media_ids = json.loads(publication.media_ids_json)
@@ -1606,6 +1627,8 @@ def publish_telegram_content_item(
             publication.media_ids_json = json.dumps(media_ids)
     if not isinstance(media_ids, list) or not all(isinstance(value, str) for value in media_ids):
         raise HTTPException(status_code=409, detail="Telegram draft contains invalid files")
+    if item.no_caption and not media_ids:
+        raise HTTPException(status_code=409, detail="Для публикации без подписи выберите фото или видео")
     media_files: list[MediaFile] = []
     if media_ids:
         media_query = (
@@ -1635,7 +1658,7 @@ def publish_telegram_content_item(
         raise HTTPException(status_code=409, detail="Публикация уже отправлена или отправляется")
     db.commit()
     try:
-        external_id = publish_to_channel(get_settings(), publication.caption, media_files)
+        external_id = publish_to_channel(get_settings(), "" if item.no_caption else publication.caption, media_files)
     except TelegramPublishError as error:
         publication.status = PublicationStatus.FAILED
         publication.error = str(error)
@@ -1681,7 +1704,7 @@ def publish_instagram_content_item(
         raise HTTPException(status_code=409, detail="Публикация уже отправлена или отправляется")
     if item.status not in {ContentStatus.READY, ContentStatus.SCHEDULED}:
         raise HTTPException(status_code=409, detail="Сначала подготовьте материал")
-    if not publication.caption:
+    if not item.no_caption and not publication.caption:
         raise HTTPException(status_code=409, detail="У Instagram-публикации нет текста")
     try:
         media_ids = json.loads(publication.media_ids_json)
@@ -1713,7 +1736,7 @@ def publish_instagram_content_item(
     db.commit()
     try:
         external_id = publish_to_instagram(
-            db, get_settings(), publication, publication.caption, media_files
+            db, get_settings(), publication, "" if item.no_caption else publication.caption, media_files
         )
     except InstagramPublishError as error:
         publication.status = PublicationStatus.FAILED

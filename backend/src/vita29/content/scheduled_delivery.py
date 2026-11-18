@@ -33,6 +33,10 @@ def content_hash(item, publication):
     payload = [item.title, item.caption, item.editor_instruction, item.visual_edit_requested,
                item.content_format.value, publication.platform.value, publication.publication_format,
                publication.caption, publication.media_ids_json]
+    if item.no_caption:
+        payload.append("no_caption")
+    if item.no_title_on_image:
+        payload.append("no_title_on_image")
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
 
 
@@ -104,7 +108,9 @@ def validate_media(db, item, publication, user):
                 return False
         if any(same_media(other) for other in others):
             raise ValueError("Instagram публикует одиночное видео как Reels. Чтобы ролик не вышел дважды, создайте отдельные публикации: пост с фото и Reels с видео.")
-    if not (publication.caption or "").strip():
+    if getattr(item, "no_caption", False) and not files:
+        raise ValueError("Для публикации без подписи выберите фото или видео")
+    if not getattr(item, "no_caption", False) and not (publication.caption or "").strip():
         raise ValueError("Сначала подготовьте текст публикации")
     return files
 
@@ -200,19 +206,19 @@ def publish_now(db: Session, item: ContentItem, publication: ContentPublication,
     db.refresh(publication)
     try:
         if publication.platform == PublicationPlatform.WHATSAPP_STUDIO:
-            external_id = publish_whatsapp_stories(db, settings, publication, publication.caption, files)
+            external_id = publish_whatsapp_stories(db, settings, publication, ("" if item.no_caption else publication.caption), files)
         elif publication.platform == PublicationPlatform.TELEGRAM_STUDIO:
-            external_id = publish_telegram_stories(db, settings, publication, publication.caption, files, target='studio')
+            external_id = publish_telegram_stories(db, settings, publication, ("" if item.no_caption else publication.caption), files, target='studio')
         elif publication.platform == PublicationPlatform.TELEGRAM:
-            external_id = publish_telegram_stories(db, settings, publication, publication.caption, files) if publication.publication_format == 'story' else publish_to_channel(settings, publication.caption, files)
+            external_id = publish_telegram_stories(db, settings, publication, ("" if item.no_caption else publication.caption), files) if publication.publication_format == 'story' else publish_to_channel(settings, ("" if item.no_caption else publication.caption), files)
         elif publication.platform == PublicationPlatform.INSTAGRAM:
-            external_id = publish_to_instagram(db, settings, publication, publication.caption, files)
+            external_id = publish_to_instagram(db, settings, publication, ("" if item.no_caption else publication.caption), files)
         elif publication.platform == PublicationPlatform.THREADS:
-            external_id = publish_to_threads(db, settings, publication, publication.caption, files)
+            external_id = publish_to_threads(db, settings, publication, ("" if item.no_caption else publication.caption), files)
         elif publication.platform == PublicationPlatform.VK:
-            external_id = publish_to_vk(settings, publication.caption, files, publication.id)
+            external_id = publish_to_vk(settings, ("" if item.no_caption else publication.caption), files, publication.id)
         else:
-            external_id = publish_max_stories(db, settings, publication, publication.caption, files) if publication.publication_format == 'story' else publish_to_max(settings, publication.caption, files)
+            external_id = publish_max_stories(db, settings, publication, ("" if item.no_caption else publication.caption), files) if publication.publication_format == 'story' else publish_to_max(settings, ("" if item.no_caption else publication.caption), files)
     except Exception as error:
         log.error("Immediate publication failed for %s (%s)", publication.id, type(error).__name__)
         db.rollback()
@@ -276,19 +282,19 @@ def deliver_one(session_factory, publication_id):
             snapshot_publication(settings, publication.id, files)
             attempted = True
             if publication.platform == PublicationPlatform.WHATSAPP_STUDIO:
-                external_id = publish_whatsapp_stories(db, settings, publication, publication.caption, files)
+                external_id = publish_whatsapp_stories(db, settings, publication, ("" if item.no_caption else publication.caption), files)
             elif publication.platform == PublicationPlatform.TELEGRAM_STUDIO:
-                external_id = publish_telegram_stories(db, settings, publication, publication.caption, files, target='studio')
+                external_id = publish_telegram_stories(db, settings, publication, ("" if item.no_caption else publication.caption), files, target='studio')
             elif publication.platform == PublicationPlatform.TELEGRAM:
-                external_id = publish_telegram_stories(db, settings, publication, publication.caption, files) if publication.publication_format == 'story' else publish_to_channel(settings, publication.caption, files)
+                external_id = publish_telegram_stories(db, settings, publication, ("" if item.no_caption else publication.caption), files) if publication.publication_format == 'story' else publish_to_channel(settings, ("" if item.no_caption else publication.caption), files)
             elif publication.platform == PublicationPlatform.INSTAGRAM:
-                external_id = publish_to_instagram(db, settings, publication, publication.caption, files)
+                external_id = publish_to_instagram(db, settings, publication, ("" if item.no_caption else publication.caption), files)
             elif publication.platform == PublicationPlatform.THREADS:
-                external_id = publish_to_threads(db, settings, publication, publication.caption, files)
+                external_id = publish_to_threads(db, settings, publication, ("" if item.no_caption else publication.caption), files)
             elif publication.platform == PublicationPlatform.VK:
-                external_id = publish_to_vk(settings, publication.caption, files, publication.id)
+                external_id = publish_to_vk(settings, ("" if item.no_caption else publication.caption), files, publication.id)
             else:
-                external_id = publish_max_stories(db, settings, publication, publication.caption, files) if publication.publication_format == 'story' else publish_to_max(settings, publication.caption, files)
+                external_id = publish_max_stories(db, settings, publication, ("" if item.no_caption else publication.caption), files) if publication.publication_format == 'story' else publish_to_max(settings, ("" if item.no_caption else publication.caption), files)
             publication.status = PublicationStatus.PUBLISHED
             publication.published_at = utc_now()
             publication.external_id = external_id
