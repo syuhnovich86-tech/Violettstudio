@@ -99,6 +99,13 @@ class ContentItemResponse(BaseModel):
     updated_at: datetime
 
 
+class ArchivePlatformStatus(BaseModel):
+    platform: PublicationPlatform
+    publication_format: str
+    status: str
+    error: str | None
+
+
 class ArchiveEntry(BaseModel):
     publication_id: str
     item_id: str
@@ -110,6 +117,7 @@ class ArchiveEntry(BaseModel):
     media_ids: list[str]
     preview_media_id: str | None
     platforms: list[PublicationPlatform] = Field(default_factory=list)
+    publication_statuses: list[ArchivePlatformStatus] = Field(default_factory=list)
 
 
 class ArchivePage(BaseModel):
@@ -735,12 +743,14 @@ def publication_archive(
         publication = publications[0]
         data = publication_response(publication)
         preview = next((media_id for media_id in data.media_ids if (media := db.get(MediaFile, media_id)) is not None and media.media_type == MediaType.IMAGE and can_view_archive_media(db, media, _)), None)
+        all_publications = db.scalars(select(ContentPublication).where(ContentPublication.content_item_id == item_id)).all()
         items.append(ArchiveEntry(publication_id=publication.id, item_id=item.id, title=item.title,
                                   description=publication.caption or item.caption, platform=publication.platform,
                                   publication_format=publication.publication_format,
                                   published_at=publication.published_at or publication.created_at,
                                   media_ids=data.media_ids, preview_media_id=preview,
-                                  platforms=list(dict.fromkeys(p.platform for p in publications))))
+                                  platforms=list(dict.fromkeys(p.platform for p in publications)),
+                                  publication_statuses=[ArchivePlatformStatus(platform=p.platform, publication_format=p.publication_format, status="cancelled" if (job := db.get(ScheduledPublicationJob, p.id)) and job.state == "cancelled" else p.status.value, error=p.error) for p in all_publications]))
     return ArchivePage(items=items, next_offset=offset + limit if len(groups) > limit else None)
 
 

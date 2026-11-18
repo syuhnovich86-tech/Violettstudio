@@ -822,3 +822,10 @@ summary { color:var(--gold); cursor:pointer; font-weight:750; }
 .availability-table th, .availability-table td { padding: 0.6rem; border-bottom: 1px solid #eaded4; vertical-align: middle; }
 .availability-table small { display: block; }
 .availability-schedule-form input[type="checkbox"], .availability-schedule-form input[type="radio"] { width: 18px; height: 18px; min-height: 0; flex: 0 0 18px; margin-right: 0.35rem; vertical-align: middle; }
+
+.content-platforms span.published { color: #216b3c; background: #e2f3e8; }
+.content-platforms span.failed { color: #a32929; background: #fde5e5; }
+.content-platforms span.publishing { color: #81570d; background: #fff0cc; }
+
+.content-option-check, .content-create-form > .content-option-check { display:flex; align-items:center; gap:8px; }
+.content-option-check input[type="checkbox"], .content-create-form .content-option-check input[type="checkbox"] { width:18px; height:18px; min-height:0; max-width:18px; padding:0; margin:0; flex:0 0 18px; accent-color:#bd7a20; }

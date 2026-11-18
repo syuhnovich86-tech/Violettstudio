@@ -99,6 +99,9 @@ def test_remove_partial_publication_keeps_history_and_stops_queue(client, tmp_pa
         published_id, cancelled_id = published.id, cancelled.id
     archive = client.get("/api/v1/content/archive", headers=headers).json()["items"]
     assert item_id in {i["item_id"] for i in archive}
+    archived = next(i for i in archive if i["item_id"] == item_id)
+    assert {(p["platform"], p["status"]) for p in archived["publication_statuses"]} == {
+        ("telegram", "published"), ("instagram", "failed"), ("max", "cancelled")}
     reused = client.post(f"/api/v1/content/archive/{published_id}/reuse",
                         headers=headers, json={"platforms": ["telegram"]})
     assert reused.status_code == 201

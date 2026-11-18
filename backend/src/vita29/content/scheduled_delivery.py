@@ -329,6 +329,9 @@ def deliver_one(session_factory, publication_id):
 
 def run_due(session_factory):
     with session_factory() as db:
+        # SQLite supports one writer at a time. Concurrent delivery workers can
+        # leave provider outcomes unsaved after lock contention; serialize them.
+        sqlite = db.get_bind().dialect.name == "sqlite"
         stale = db.scalars(select(ScheduledPublicationJob).where(ScheduledPublicationJob.state == "sending", ScheduledPublicationJob.updated_at < utc_now() - timedelta(hours=1))).all()
         for job in stale:
             publication = db.get(ContentPublication, job.publication_id)
@@ -344,5 +347,5 @@ def run_due(session_factory):
             db.commit()
         ids = db.scalars(select(ScheduledPublicationJob.publication_id).join(ContentPublication, ContentPublication.id == ScheduledPublicationJob.publication_id).join(ContentItem, ContentItem.id == ContentPublication.content_item_id).where(ScheduledPublicationJob.state == "queued", ContentItem.deleted_at.is_(None), ContentItem.status.in_([ContentStatus.SCHEDULED, ContentStatus.FAILED]), ContentItem.publication_date_assigned.is_(True), ContentItem.scheduled_at <= utc_now()).limit(20)).all()
     if ids:
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=1 if sqlite else 3) as executor:
             list(executor.map(lambda publication_id: deliver_one(session_factory, publication_id), ids))
