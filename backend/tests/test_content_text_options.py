@@ -1,4 +1,10 @@
+import base64
+import io
 import json
+from contextlib import nullcontext
+
+import httpx
+from PIL import Image
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -73,35 +79,72 @@ def test_agent_schema_does_not_ask_for_caption(tmp_path, monkeypatch):
     assert draft.caption == ''
 
 
-def test_prompt_only_collage_excludes_title_and_caption(monkeypatch):
-    item = SimpleNamespace(id='item', title='СЕКРЕТНОЕ НАЗВАНИЕ', no_title_on_image=True, visual_style='auto')
-    source = [SimpleNamespace(media_type=visual.MediaType.IMAGE), SimpleNamespace(media_type=visual.MediaType.IMAGE)]
-    captured = []
-    monkeypatch.setattr(visual, 'config_value', lambda *args: 'false')
-    monkeypatch.setattr(visual, '_before_after_collage', lambda *args, **kwargs: captured.append((args, kwargs)) or b'image')
-    monkeypatch.setattr(visual, '_save_generated_image', lambda db, settings, item, actor, instruction, image: image)
-    result = visual.generate_branded_visual(None, None, item, 'actor', 'Коллаж до и после. Надпись: Привет', source, copy_hint='Чужая подпись')
-    assert result == b'image'
-    args, kwargs = captured[0]
-    assert args[2] == '' and args[4] is None and kwargs['prompt_only'] is True
+@pytest.mark.parametrize("suffix", [", не крупно, внизу генерации", ", мелким шрифтом", "\nРасположить внизу"])
+def test_banner_layout_notes_are_not_printed(suffix):
+    offer = "Лазерное удаление и ремувер со скидкой 50%, 27 ноября"
+    assert visual._campaign_copy("", "Написать: " + offer + suffix) == (offer, True)
+    assert visual._campaign_copy("", "Напиши «Запись внизу, мелко»" + suffix) == ("Запись внизу, мелко", True)
 
 
-@pytest.mark.parametrize('instruction, expected_title', [
-    ('Сделай коллаж', 'Брови'),
-    ('Сделай коллаж, надпись: ПМ', 'ПМ Брови'),
-    ('Сделай коллаж, надпись: пм', 'ПМ Брови'),
+@pytest.mark.parametrize("count, note, endpoint", [
+    (0, "Сделай светлый баннер.", "generations"),
+    (1, "Обработай фото.", "edits"),
+    (2, "Оформи акцию.", "edits"),
+    (2, "Коллаж до после.", "generations"),
 ])
-def test_pm_on_collage_only_when_requested(monkeypatch, instruction, expected_title):
-    item = SimpleNamespace(id='item', title='ПМ Брови', no_title_on_image=False, visual_style='auto')
-    source = [SimpleNamespace(media_type=visual.MediaType.IMAGE), SimpleNamespace(media_type=visual.MediaType.IMAGE)]
-    captured = []
-    monkeypatch.setattr(visual, 'config_value', lambda *args: 'false')
-    monkeypatch.setattr(visual, '_before_after_collage', lambda *args, **kwargs: captured.append(args) or b'image')
-    monkeypatch.setattr(visual, '_save_generated_image', lambda db, settings, item, actor, instruction, image: image)
-    visual.generate_branded_visual(None, None, item, 'actor', instruction, source, copy_hint='ПМ Акция')
-    assert captured[0][2] == expected_title
-    if 'пм' not in instruction.casefold():
-        assert 'ПМ' not in captured[0][4]
+def test_all_artwork_text_uses_image_api(tmp_path, monkeypatch, count, note, endpoint):
+    item = SimpleNamespace(id="item", title="ПМ СЕКРЕТНОЕ НАЗВАНИЕ", no_title_on_image=True, visual_style="dark")
+    settings = Settings(media_root=tmp_path / "media")
+    sources = []
+    for i, color in enumerate(["red", "blue"][:count]):
+        key = f"qa/{i}.jpg"
+        path = settings.originals_path / key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (120, 40), color).save(path)
+        sources.append(SimpleNamespace(id=str(i), media_type=visual.MediaType.IMAGE, storage_key=key))
+    encoded = io.BytesIO()
+    Image.new("RGB", (300, 450), "green").save(encoded, format="JPEG")
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append((url, kwargs))
+        return httpx.Response(200, request=httpx.Request("POST", url),
+                              json={"data": [{"b64_json": base64.b64encode(encoded.getvalue()).decode()}]})
+
+    monkeypatch.setattr(visual, "openai_ipv4_client", lambda *args: nullcontext(SimpleNamespace(post=post)))
+    monkeypatch.setattr(visual, "read_openai_secret", lambda *args: "fixture")
+    monkeypatch.setattr(visual, "config_value", lambda cfg, name, default: "false" if name == "openai_native_visuals" else default)
+    monkeypatch.setattr(visual, "_save_generated_image", lambda db, cfg, item, actor, note, image: image)
+    note += " Написать: Скидка 50%, 27 ноября, не крупно, внизу генерации"
+    result = visual.generate_branded_visual(None, settings, item, "actor", note, sources, copy_hint="ЛИШНЯЯ ПОДПИСЬ",
+                                            force_edit=count == 1)
+    (url, payload), = calls
+    assert url.endswith("/images/" + endpoint)
+    prompt = (payload.get("json") or payload["data"])["prompt"]
+    assert "«Скидка 50%, 27 ноября»" in prompt
+    assert "СЕКРЕТНОЕ НАЗВАНИЕ" not in prompt and "ЛИШНЯЯ ПОДПИСЬ" not in prompt
+    assert "Do not add or render the letters" in prompt
+    if count == 2 and endpoint == "generations":
+        assert "files" not in payload and "bottom 28%" in prompt
+        with Image.open(io.BytesIO(result)) as image:
+            first, second = image.getpixel((150, 80)), image.getpixel((150, 230))
+            assert first[0] > 220 and first[2] < 25
+            assert second[2] > 220 and second[0] < 25
+            assert image.getpixel((150, 400))[1] > 100
+    else:
+        assert result == encoded.getvalue()
+        assert len(payload.get("files", [])) == count
+
+
+def test_image_api_failure_never_saves_a_template(monkeypatch):
+    item = SimpleNamespace(id="item", title="Акция", no_title_on_image=False)
+    monkeypatch.setattr(visual, "read_openai_secret", lambda *args: "fixture")
+    def post(url, **kwargs):
+        return httpx.Response(503, request=httpx.Request("POST", url))
+    monkeypatch.setattr(visual, "openai_ipv4_client", lambda *a: nullcontext(SimpleNamespace(post=post)))
+    monkeypatch.setattr(visual, "_save_generated_image", lambda *a: pytest.fail("Unexpected image save"))
+    with pytest.raises(agent.ContentAgentError):
+        visual.generate_branded_visual(None, Settings(), item, "actor", "Надпись: Запись открыта", [])
 
 
 def test_native_visual_prompt_does_not_request_unwanted_pm():

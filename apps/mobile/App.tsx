@@ -7,7 +7,7 @@ import { focusManager, QueryClient, QueryClientProvider } from '@tanstack/react-
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, AppState, Modal, Platform, Pressable, StyleSheet, View } from 'react-native';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { NavigationIcon } from './src/components/NavigationIcon';
 import { UpdateBanner } from './src/components/UpdateBanner';
@@ -74,6 +74,7 @@ function CameraTabButton({ onPress, onLongPress, accessibilityState }: BottomTab
 
 function AuthenticatedApp() {
   const { user, loading } = useAuth();
+  const insets = useSafeAreaInsets();
   const [profileOpen, setProfileOpen] = useState(false);
   useEffect(() => {
     if (Platform.OS !== 'android' || !user) return;
@@ -122,8 +123,12 @@ function AuthenticatedApp() {
             initialRouteName="Visits"
             screenOptions={({ route }) => ({
               headerShown: false,
-              tabBarShowLabel: false,
-              tabBarStyle: styles.tabBar,
+              tabBarShowLabel: true,
+              tabBarLabelPosition: 'below-icon',
+              tabBarActiveTintColor: colors.ink,
+              tabBarInactiveTintColor: colors.muted,
+              tabBarLabelStyle: { fontSize: 11, fontWeight: '600' },
+              tabBarStyle: [styles.tabBar, { height: 62 + insets.bottom, paddingBottom: insets.bottom + 4 }],
               tabBarItemStyle: styles.tabItem,
               tabBarIcon: ({ focused }) => (
                 <NavigationIcon name={tabIcons[route.name]} active={focused} size={29} />
@@ -137,8 +142,8 @@ function AuthenticatedApp() {
               component={AddScreen}
               options={{ tabBarButton: (props) => <CameraTabButton {...props} /> }}
             />
-            <Tab.Screen name="Content" component={ContentScreen} />
-            <Tab.Screen name="Chats" component={ChatsScreen} />
+            <Tab.Screen name="Content" component={ContentScreen} options={{ title: 'Контент' }} />
+            <Tab.Screen name="Chats" component={ChatsScreen} options={{ title: 'Чаты' }} />
           </Tab.Navigator>
           <UpdateBanner />
           <Modal visible={profileOpen} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setProfileOpen(false)}>
@@ -165,29 +170,19 @@ export default function App() {
 const styles = StyleSheet.create({
   loading: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.cream },
   tabBar: {
-    height: 82,
     paddingTop: 8,
-    paddingBottom: 14,
     borderTopColor: colors.line,
     backgroundColor: colors.white,
   },
   tabItem: { minWidth: 48 },
   cameraSlot: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   cameraButton: {
-    width: 72,
-    height: 72,
-    marginTop: -34,
-    borderRadius: 36,
+    width: 50,
+    height: 48,
+    borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: colors.honey,
-    borderWidth: 6,
-    borderColor: colors.cream,
-    shadowColor: colors.gold,
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.3,
-    shadowRadius: 14,
-    elevation: 10,
   },
   pressed: { opacity: 0.72 },
 });

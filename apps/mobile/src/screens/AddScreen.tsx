@@ -93,7 +93,7 @@ export function AddScreen({ route, navigation }: BottomTabScreenProps<RootTabs, 
   }
   if (cameraOpen) return <View style={styles.cameraScreen}><CameraView ref={camera} style={StyleSheet.absoluteFill} facing="back" /><Pressable accessibilityLabel="Закрыть камеру" onPress={() => setCameraOpen(false)} style={styles.closeCamera}><Ionicons name="close" size={29} color={colors.white} /></Pressable><Pressable accessibilityLabel="Сделать снимок" onPress={() => void capture()} style={styles.shutter}><View style={styles.shutterInner} /></Pressable></View>;
   return <Screen>
-    <PageHeader kicker="Загрузка" title="Добавить" subtitle="Камера и файлы Android сразу загружаются в выбранную папку сервера" />
+    <PageHeader title="Добавить" subtitle="Камера и файлы Android сразу загружаются в выбранную папку сервера" />
     {!user?.can_upload_media ? <Empty icon="lock-closed-outline" title="Загрузка запрещена" text="Администратор не выдал вашему аккаунту право добавлять материалы." /> : <>
       <View style={styles.sourceRow}><Pressable onPress={() => void openCamera()} style={[styles.source, styles.cameraSource]}><Ionicons name="camera" size={36} color={colors.ink} /><Text style={styles.sourceTitle}>Камера</Text><Text style={styles.sourceText}>Снять фото</Text></Pressable><Pressable onPress={() => void pick()} style={[styles.source, styles.gallerySource]}><Ionicons name="images" size={36} color={colors.ink} /><Text style={styles.sourceTitle}>Галерея</Text><Text style={styles.sourceText}>До 20 файлов</Text></Pressable></View>
       <Text style={styles.section}>Папка на сервере</Text>

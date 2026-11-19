@@ -101,7 +101,7 @@ export function CalendarScreen({ navigation }: BottomTabScreenProps<RootTabs, 'V
     finally { setSyncing(false); }
   }
   return <Screen>
-    <PageHeader kicker="Календарь" title="Визиты" subtitle="Расписание и привязанные материалы с сервера" action={user?.role === 'owner' ? 'sync-outline' : undefined} onAction={() => void sync()} />
+    <PageHeader title="Визиты" subtitle="Расписание и привязанные материалы с сервера" action={user?.role === 'owner' ? 'sync-outline' : undefined} onAction={() => void sync()} />
     {(users.data?.length ?? 0) > 1 ? <View style={styles.users}>
       <Pressable onPress={() => setCalendarUser('')} style={[styles.userPill, !calendarUser && styles.activePill]}><Text style={[styles.userText, !calendarUser && styles.activeText]}>Все</Text></Pressable>
       {users.data?.map((item) => <Pressable key={item.user_id} onPress={() => setCalendarUser(item.user_id)} style={[styles.userPill, calendarUser === item.user_id && styles.activePill]}><Text style={[styles.userText, calendarUser === item.user_id && styles.activeText]}>{item.display_name}</Text></Pressable>)}

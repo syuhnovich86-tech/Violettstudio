@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import math
 import re
 import uuid
 from datetime import UTC, datetime
@@ -492,10 +493,20 @@ def _campaign_copy(
             # Stop at the line boundary so later system instructions do not
             # become part of the printed message.
             found = re.search(r"\bнапиши\s+([^\n]+)", value, flags=re.IGNORECASE)
-        # Preserve punctuation and requested wording exactly. Only whitespace
-        # is folded because the renderer cannot use a literal line break as a
-        # separate label. The 520-character limit protects the image layout.
-        return normalize_pm(" ".join(found.group(1).split())[:520]) if found else None
+        if not found:
+            return None
+        wording = found.group(1).strip()
+        layout = (r"(?:не\s*крупно|крупно|мелко|(?:мелким|крупным|небольшим)\s+шрифтом|"
+                  r"(?:внизу|снизу|вверху|по\s+центру)(?=\s*(?:[.,;!]|$)|\s+(?:генерации|картинки|кадра|фото|макета))|"
+                  r"размести(?:ть)?\b|расположи(?:ть)?\b)")
+        # Preserve quoted wording even when it mentions a placement or size.
+        quoted = re.match(r'^(?:«([^»]+)»|"([^"]+)"|“([^”]+)”)', wording)
+        if quoted and (not wording[quoted.end():].strip(" .,;!\n") or
+                       re.match(rf"^[\s,.;:—–-]+{layout}", wording[quoted.end():], flags=re.IGNORECASE)):
+            wording = next(group for group in quoted.groups() if group is not None)
+        else:
+            wording = re.split(rf"(?:[,;]\s*|[.!]\s+|\n\s*){layout}", wording, maxsplit=1, flags=re.IGNORECASE)[0]
+        return normalize_pm(" ".join(wording.split())[:520]) or None
 
     copy = explicit_copy(history[0]) if history else None
     has_exact_copy = copy is not None
@@ -888,7 +899,7 @@ def _requires_true_photo_edit(instruction: str) -> bool:
     ))
 
 
-def _native_visual_prompt(title: str, instruction: str, *, has_source: bool, force_edit: bool, style: str, copy_hint: str | None = None, source_count: int = 0) -> str:
+def _native_visual_prompt(title: str, instruction: str, *, has_source: bool, force_edit: bool, style: str, copy_hint: str | None = None, source_count: int = 0, prompt_only: bool = False) -> str:
     """Give the image model the actual brief and let it art-direct typography.
 
     An explicit photo edit does not silently become a poster or change a
@@ -900,6 +911,17 @@ def _native_visual_prompt(title: str, instruction: str, *, has_source: bool, for
     pm_rule = ('Only use the abbreviation «ПМ» when explicitly requested in the editor instructions; write it uppercase. '
                if re.search(r'(?<!\w)пм(?!\w)', editor_note, re.IGNORECASE)
                else 'Do not add or render the letters «ПМ» anywhere in the image. ')
+    copy, exact = _campaign_copy(title, instruction, copy_hint)
+    if exact:
+        typography = f'The requested verbatim Russian lettering is: «{copy}». '
+    elif prompt_only or force_edit:
+        typography = 'Use only lettering specifically requested in the editor brief. '
+    elif copy:
+        typography = f'Use this Russian copy as a starting point, retaining facts and numbers: «{copy}». '
+    else:
+        typography = 'Use only lettering justified by the brief. '
+    typography += ('Treat size, position, font and other production notes only as art direction. '
+                   'Never print those directions on the image. If the editor asks for no lettering, omit it. ')
     if has_source and force_edit:
         return (
             'Edit the supplied photograph according to the user request. Preserve the same person, '
@@ -907,29 +929,69 @@ def _native_visual_prompt(title: str, instruction: str, *, has_source: bool, for
             'Change only the explicitly requested objects, colours, retouching, text or layout; do not introduce '
             'a different face, new treatment, frame, logo, caption, or banner unless specifically requested. '
             'For colour changes keep texture, shadows and object shape natural. Keep the original photo recognisable. '
-            + pm_rule +
+            + pm_rule + typography +
             f'User title: {topic}\nExact editor request: {editor_note}'
         )
     family = ('warm ivory, champagne and subtle taupe, clean premium editorial design' if style == 'light'
               else 'near-black and espresso with restrained champagne-gold, refined premium editorial design')
-    copy, exact = _campaign_copy(title, instruction, copy_hint)
     source_rule = ('Use supplied source images faithfully; preserve recognisable people and actual treatment results. '
                    'Do not invent before/after results. ' if has_source else '')
     if source_count > 1:
         source_rule += 'Compose the provided photographs into an elegant coherent collage; each selected photograph must remain identifiable and not be substituted with an invented result. '
-    typography = (f'Render this supplied Russian copy correctly and legibly, preserving wording and numbers: «{copy}». '
-                  if copy else 'Use minimal copy and do not invent prices, discounts or dates. ')
+    branding = ('Do not add a brand name, headings, labels or slogans unless requested. ' if prompt_only else
+                'Use VIOLETTA as a restrained wordmark only if consistent with the requested lettering. ')
     return (
         'Create a finished, polished, art-directed vertical social media creative for the Russian beauty studio VIOLETTA. '
         f'Visual style: {family}. The image model should create the full composition and elegant legible Cyrillic typography, '
         'not an empty template. Compose text and imagery together with clear hierarchy, generous margins and no clipping. '
         'Use tasteful serif and clean supporting type appropriate to the design. Avoid clutter and generic decorative lettering. '
-        'Use VIOLETTA as a restrained wordmark; do not invent a detailed logo or inaccurate prices. '
-        + pm_rule +
+        + branding + pm_rule +
         f'{source_rule}{typography}'
         f'Topic: {topic}\nEditor instructions: {editor_note}\n'
         'Respect the editor instructions while preserving all stated facts. Do not add unrequested claims or prices.'
     )
+
+
+def _place_comparison_photos(background: bytes, photos: list[MediaFile], settings: Settings, *, text_below: bool) -> bytes:
+    """Fit the original evidence photos inside the space reserved by the image API."""
+    with Image.open(io.BytesIO(background)) as generated:
+        canvas = generated.convert("RGB")
+    width, height = canvas.size
+    margin = max(1, round(width * .035))
+    gap = max(1, round(width * .008))
+    top = margin if text_below else round(height * .32)
+    bottom = round(height * .68) if text_below else height - margin
+    paths = [original_path(settings, photo.storage_key) for photo in photos]
+    aspects = []
+    for path in paths:
+        with Image.open(path) as source:
+            w, h = source.size
+            if source.getexif().get(274) in (5, 6, 7, 8):
+                w, h = h, w
+            aspects.append(w / h)
+
+    def cell_size(columns: int) -> tuple[int, int]:
+        rows = math.ceil(len(paths) / columns)
+        return ((width - 2 * margin - (columns - 1) * gap) // columns,
+                (bottom - top - (rows - 1) * gap) // rows)
+
+    def occupied_area(columns: int) -> float:
+        w, h = cell_size(columns)
+        return sum(min(w, h * aspect) * min(h, w / aspect) for aspect in aspects)
+
+    columns = max(range(1, len(paths) + 1), key=occupied_area)
+    w, h = cell_size(columns)
+    for index, path in enumerate(paths):
+        row, col = divmod(index, columns)
+        count_in_row = min(columns, len(paths) - row * columns)
+        left = (width - (count_in_row * w + (count_in_row - 1) * gap)) // 2
+        with Image.open(path) as source:
+            photograph = ImageOps.contain(ImageOps.exif_transpose(source).convert("RGB"), (w, h))
+        canvas.paste(photograph, (left + col * (w + gap) + (w - photograph.width) // 2,
+                                  top + row * (h + gap) + (h - photograph.height) // 2))
+    result = io.BytesIO()
+    canvas.save(result, format="JPEG", quality=95)
+    return result.getvalue()
 
 
 def _save_generated_image(
@@ -968,7 +1030,6 @@ def generate_branded_visual(
     """Generate or carefully edit one visual and save it in the shared output folder."""
     selected_style = getattr(item, "visual_style", "auto")
     image_sources = [entry for entry in source_media if entry.media_type == MediaType.IMAGE][:16]
-    native_visuals = config_value(settings, 'openai_native_visuals', 'true').casefold() != 'false'
     visual_title = "" if item.no_title_on_image else item.title
     # A topic or generated caption may mention ПМ, but only the editor's
     # instruction authorizes painting this abbreviation onto the artwork.
@@ -982,43 +1043,37 @@ def generate_branded_visual(
             raise ContentAgentError("Укажите в поле «Пожелания к публикации», что должно быть на изображении.")
     collage_requested = _wants_collage(visual_title, instruction)
     before_after = bool(re.search(r'до\s*(?:(?:и|/|—|-)\s*)?после', f'{visual_title}\n{instruction}'.casefold()))
-    # The order selected in the archive is meaningful: for two photos it is
-    # "before" then "after". Render this locally so the client result is never
-    # invented or mixed by an image model.
-    if len(image_sources) >= 2 and not force_edit and (before_after or not (native_visuals and collage_requested)):
-        return _save_generated_image(
-            db, settings, item, actor_id, instruction,
-            _before_after_collage(
-                image_sources, settings, visual_title, instruction, copy_hint, requested_style=selected_style, prompt_only=item.no_title_on_image,
-            ),
-        )
+    preserve_photos = len(image_sources) >= 2 and before_after and not (force_edit and _requires_true_photo_edit(instruction))
+    text_below = bool(re.search(r"\b(?:внизу|снизу|в нижней части)\b", instruction, re.IGNORECASE))
     api_key = read_openai_secret(settings)
     image_model = config_value(settings, "openai_image_model", settings.openai_image_model)
-    # The short topic is passed alongside an optional editor note, so image
-    # generation cannot accidentally illustrate a different treatment.
-    # Several selected source photos are intentionally treated as a collage as
-    # well: the content agent made that selection specifically for one merged
-    # publication visual. A single selected photo remains a normal edit.
-    prompt = (_native_visual_prompt(visual_title, instruction, has_source=bool(image_sources), force_edit=force_edit,
-                                   style=_visual_style(visual_title, instruction, collage=collage_requested, requested_style=selected_style), copy_hint=copy_hint, source_count=len(image_sources))
-              if native_visuals else _visual_prompt(visual_title, instruction, bool(image_sources),
-                  collage=collage_requested or len(image_sources) >= 2, requested_style=selected_style))
-    if item.no_title_on_image:
-        prompt = ("Create or edit the requested image using only the following user brief. "
-                  "Use only text explicitly requested in the brief; do not invent headings, labels, logos or slogans. "
-                  "Preserve the identity and procedure result of any supplied photographs. "
-                  + ("Use «ПМ» only if requested, with both letters uppercase. " if pm_requested else "Do not add or render the letters «ПМ». ")
-                  + "\nUser brief: " + instruction)
+    prompt = _native_visual_prompt(
+        visual_title, instruction, has_source=bool(image_sources) and not preserve_photos,
+        force_edit=force_edit and not preserve_photos,
+        style=_visual_style(visual_title, instruction, collage=collage_requested, requested_style=selected_style),
+        copy_hint=copy_hint, source_count=0 if preserve_photos else len(image_sources),
+        prompt_only=item.no_title_on_image,
+    )
+    if preserve_photos:
+        band = "bottom" if text_below else "top"
+        prompt += (
+            f"\nThis is the background and finished typography for an authentic comparison. "
+            f"Compose ALL lettering and branding wholly within the {band} 28% of the portrait canvas, "
+            "with generous margins. Elsewhere continue only the background. "
+            "Do not draw photo slots, blank frames, outlines or panels ANYWHERE, including the text band. "
+            "Keep the entire area outside the lettering free of people, images and labels. "
+            "The original photographs will be placed separately after this step."
+        )
     detailed_model = image_model.startswith(('gpt-image-2.5', 'gpt-image-2.6'))
     image_options = {'model': image_model, 'prompt': prompt, 'size': '1024x1536',
-                     'quality': 'xhigh' if native_visuals and detailed_model else 'high',
+                     'quality': 'xhigh' if detailed_model else 'high',
                      'output_format': 'jpeg', 'background': 'opaque'}
     if image_model.startswith('gpt-image-2.6'):
         image_options['complexity'] = 'low' if image_sources and force_edit else 'high'
     headers = {"Authorization": f"Bearer {api_key}"}
     try:
         with openai_ipv4_client(max(settings.openai_http_timeout_seconds, 180.0)) as client:
-            if image_sources:
+            if image_sources and not preserve_photos:
                 files: list[tuple[str, tuple[str, bytes, str]]] = []
                 for entry in image_sources:
                     path = original_path(settings, entry.storage_key)
@@ -1042,13 +1097,11 @@ def generate_branded_visual(
     except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError, OSError) as error:
         raise ContentAgentError("Не удалось сгенерировать изображение. Попробуйте уточнить запрос позже.") from error
 
-    if native_visuals:
-        try:
-            with Image.open(io.BytesIO(raw_image)) as image:
-                image.verify()
-        except (OSError, ValueError) as error:
-            raise ContentAgentError('Модель вернула повреждённое изображение. Повторите попытку.') from error
-        final_image = raw_image
-    else:
-        final_image = _overlay_brand_caption(raw_image, visual_title, instruction, copy_hint, requested_style=selected_style, prompt_only=item.no_title_on_image)
+    try:
+        with Image.open(io.BytesIO(raw_image)) as image:
+            image.verify()
+        final_image = (_place_comparison_photos(raw_image, image_sources, settings, text_below=text_below)
+                       if preserve_photos else raw_image)
+    except (OSError, ValueError) as error:
+        raise ContentAgentError('Не удалось прочитать изображение для карточки. Повторите попытку.') from error
     return _save_generated_image(db, settings, item, actor_id, instruction, final_image)

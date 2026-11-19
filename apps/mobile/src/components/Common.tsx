@@ -14,7 +14,7 @@ export function PrimaryButton({ title, icon, onPress, disabled = false, tone = '
 }
 
 export function Field({ label, value, onChangeText, placeholder, secureTextEntry = false, multiline = false, keyboardType }: { label?: string; value: string; onChangeText: (value: string) => void; placeholder?: string; secureTextEntry?: boolean; multiline?: boolean; keyboardType?: 'default' | 'email-address' | 'numeric' }) {
-  return <View style={styles.fieldWrap}>{label ? <Text style={styles.label}>{label}</Text> : null}<TextInput value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor={colors.muted} secureTextEntry={secureTextEntry} multiline={multiline} keyboardType={keyboardType} style={[styles.input, multiline && styles.multiline]} /></View>;
+  return <View style={styles.fieldWrap}>{label ? <Text style={styles.label}>{label}</Text> : null}<TextInput accessibilityLabel={label ?? placeholder} value={value} onChangeText={onChangeText} placeholder={placeholder} placeholderTextColor={colors.muted} secureTextEntry={secureTextEntry} multiline={multiline} keyboardType={keyboardType} style={[styles.input, multiline && styles.multiline]} /></View>;
 }
 
 export function Busy({ label = 'Загрузка данных…' }: { label?: string }) {
@@ -30,7 +30,7 @@ export function ErrorState({ message, onRetry }: { message: string; onRetry: () 
 export function Sheet({ visible, title, onClose, children, scrollRef, helpTopic }: PropsWithChildren<{ visible: boolean; title: string; onClose: () => void; scrollRef?: RefObject<ComponentRef<typeof ScrollView> | null>; helpTopic?: string }>) {
   return <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
     <SafeAreaView edges={['top', 'bottom']} style={styles.sheetSafe}>
-      <View style={styles.sheetHeader}><Text style={styles.sheetTitle}>{title}</Text><HelpButton topic={helpTopic ?? title} /><Pressable accessibilityLabel="Закрыть" onPress={onClose} style={styles.close}><Ionicons name="close" size={23} color={colors.ink} /></Pressable></View>
+      <View style={styles.sheetHeader}><Text style={styles.sheetTitle}>{title}</Text><HelpButton topic={helpTopic ?? title} /><Pressable accessibilityRole="button" accessibilityLabel="Закрыть" onPress={onClose} style={styles.close}><Ionicons name="close" size={23} color={colors.ink} /></Pressable></View>
       <ScrollView ref={scrollRef} contentContainerStyle={styles.sheetContent} keyboardShouldPersistTaps="handled">{children}</ScrollView>
     </SafeAreaView>
   </Modal>;
@@ -44,10 +44,10 @@ export function formatBytes(bytes: number) {
 }
 
 const styles = StyleSheet.create({
-  button: { minHeight: 48, paddingHorizontal: 18, borderRadius: 16, backgroundColor: colors.honey, flexDirection: 'row', gap: 8, alignItems: 'center', justifyContent: 'center', marginVertical: 5 },
+  button: { minHeight: 48, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12, backgroundColor: colors.honey, flexDirection: 'row', gap: 8, alignItems: 'center', justifyContent: 'center', marginVertical: 5 },
   buttonInk: { backgroundColor: colors.ink },
-  buttonDanger: { backgroundColor: colors.coral },
-  buttonText: { color: colors.ink, fontSize: 14, fontWeight: '900' },
+  buttonDanger: { backgroundColor: colors.dangerSoft, borderWidth: 1, borderColor: '#DEBAB2' },
+  buttonText: { flexShrink: 1, color: colors.ink, fontSize: 15, fontWeight: '600', textAlign: 'center' },
   buttonTextLight: { color: colors.white },
   faded: { opacity: 0.55 },
   fieldWrap: { gap: 6, marginBottom: 11 },
@@ -59,7 +59,7 @@ const styles = StyleSheet.create({
   empty: { minHeight: 210, padding: 24, alignItems: 'center', justifyContent: 'center', gap: 9, backgroundColor: colors.white, borderRadius: 22, borderWidth: 1, borderColor: colors.line },
   emptyTitle: { color: colors.ink, fontFamily: typography.serif, fontSize: 20, textAlign: 'center' },
   sheetSafe: { flex: 1, backgroundColor: colors.cream },
-  sheetHeader: { minHeight: 64, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: 1, borderBottomColor: colors.line },
+  sheetHeader: { minHeight: 68, paddingVertical: 8, gap: 6, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', borderBottomWidth: 1, borderBottomColor: colors.line },
   sheetTitle: { flex: 1, color: colors.ink, fontFamily: typography.serif, fontSize: 24 },
   close: { width: 42, height: 42, borderRadius: 21, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.white },
   sheetContent: { padding: 18, paddingBottom: 42 },

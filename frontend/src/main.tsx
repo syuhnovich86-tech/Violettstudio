@@ -23,6 +23,8 @@ type User = {
   can_access_chats: boolean;
   can_access_content: boolean;
   can_access_analytics: boolean;
+  can_import_ios_photo_library: boolean;
+  can_import_android_photo_library: boolean;
 };
 
 type Session = { user: User; csrf_token: string };
@@ -2197,11 +2199,17 @@ function AdminPanel({ session }: { session: Session }) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     setMessage("");
+    const phonePermissions = session.user.role === "owner" || session.user.role === "admin" ? {
+      can_import_ios_photo_library: form.has("can_import_ios_photo_library"),
+      can_import_android_photo_library: form.has("can_import_android_photo_library"),
+    } : {};
+    const ownProtectedAccount = user.role === "owner" && session.user.id === user.id;
     try {
-      await api<User>(`/users/${user.id}/permissions`, {
+      await api<User>(ownProtectedAccount ? "/users/me/phone-sync" : `/users/${user.id}/permissions`, {
         method: "PUT",
         headers: { "X-CSRF-Token": session.csrf_token },
-        body: JSON.stringify({
+        body: JSON.stringify(ownProtectedAccount ? phonePermissions : {
+          ...phonePermissions,
           role: form.get("role"),
           can_create_shared_workspaces: form.get("can_create_shared_workspaces") === "on",
           can_create_private_workspaces: form.get("can_create_private_workspaces") === "on",
@@ -2234,7 +2242,9 @@ function AdminPanel({ session }: { session: Session }) {
         <div className="user-list">
         {users.map((user) => {
           const canManage = user.role === "employee" || (session.user.role === "owner" && user.role === "admin");
+          const canChangeActive = user.id !== session.user.id && canManage;
           const canEdit = session.user.role === "owner" || user.role === "employee" || user.id === session.user.id;
+          const ownProtectedAccount = user.role === "owner" && session.user.id === user.id;
           const roleName = user.role === "owner" ? "Владелец" : user.role === "admin" ? "Администратор" : "Сотрудник";
           return (
           <div className={`user-row ${user.is_active ? "" : "inactive"} ${permissionsUserId === user.id ? "permissions-open" : ""}`} key={user.id}>
@@ -2243,11 +2253,16 @@ function AdminPanel({ session }: { session: Session }) {
               <label>Логин<input name="login" defaultValue={user.login} required minLength={3} pattern="[a-zA-Z0-9._-]+" /></label>
               <div className="user-edit-actions"><button className="primary" type="submit">Сохранить</button><button className="quiet" type="button" onClick={() => setEditingUserId(null)}>Отмена</button></div>
             </form> : <>
-              <div><strong>{user.display_name}</strong><small>@{user.login}</small></div>
-              <div className="user-controls"><span className={`badge ${user.role}`}>{roleName}</span>{canEdit && <button onClick={() => setEditingUserId(user.id)}>Изменить</button>}{canManage && <><button onClick={() => setPermissionsUserId(permissionsUserId === user.id ? null : user.id)}>Права</button><button onClick={() => { void resetPassword(user); }}>Пароль</button><button onClick={() => { void toggleActive(user); }}>{user.is_active ? "Отключить" : "Включить"}</button></>}</div>
+              <div className="user-identity"><span className="user-initial" aria-hidden="true">{user.display_name.trim().slice(0, 1)}</span><div><strong>{user.display_name}</strong><small>@{user.login}{user.id === session.user.id ? " · Вы" : ""}</small></div></div>
+              <div className="user-controls"><span className={`badge ${user.role}`}>{roleName}</span>{canEdit && <button onClick={() => setEditingUserId(user.id)}>Изменить</button>}{(canManage || ownProtectedAccount) && <button aria-expanded={permissionsUserId === user.id} onClick={() => setPermissionsUserId(permissionsUserId === user.id ? null : user.id)}>Права</button>}{canManage && <button onClick={() => { void resetPassword(user); }}>Пароль</button>}{canChangeActive && <button aria-label={(user.is_active ? "Отключить @" : "Включить @") + user.login} onClick={() => { void toggleActive(user); }}>{user.is_active ? "Отключить" : "Включить"}</button>}</div>
             </>}
             {permissionsUserId === user.id && <form className="permissions-form" onSubmit={(event) => { void updatePermissions(event, user); }}>
-              {session.user.role === "owner" ? <label>Роль<select name="role" defaultValue={user.role}><option value="employee">Сотрудник</option><option value="admin">Администратор</option></select></label> : <input type="hidden" name="role" value={user.role} />}
+              {!ownProtectedAccount && <>{session.user.role === "owner" ? <label>Роль<select name="role" defaultValue={user.role} onChange={(event) => {
+                for (const key of ["can_import_ios_photo_library", "can_import_android_photo_library"]) {
+                  const checkbox = event.currentTarget.form?.elements.namedItem(key);
+                  if (checkbox instanceof HTMLInputElement) checkbox.checked = event.currentTarget.value === "admin";
+                }
+              }}><option value="employee">Сотрудник</option><option value="admin">Администратор</option></select></label> : <input type="hidden" name="role" value={user.role} />}
               <fieldset><legend>Права пользователя</legend>
                 <label><input type="checkbox" name="can_create_shared_workspaces" defaultChecked={user.can_create_shared_workspaces} />Создавать общие папки</label>
                 <label><input type="checkbox" name="can_create_private_workspaces" defaultChecked={user.can_create_private_workspaces} />Создавать приватные папки</label>
@@ -2258,7 +2273,12 @@ function AdminPanel({ session }: { session: Session }) {
                 <label><input type="checkbox" name="can_access_chats" defaultChecked={user.can_access_chats} />Доступ к чатам</label>
                 <label><input type="checkbox" name="can_access_content" defaultChecked={user.can_access_content} />Доступ к контенту</label>
                 {session.user.role === 'owner' && <label><input type="checkbox" name="can_access_analytics" defaultChecked={user.can_access_analytics} />Доступ к аналитике</label>}
-              </fieldset>
+              </fieldset></>}
+              {(session.user.role === "owner" || session.user.role === "admin") && <fieldset>
+                <legend>Синхронизация телефона с сервером</legend>
+                <label><input type="checkbox" name="can_import_ios_photo_library" defaultChecked={user.can_import_ios_photo_library} />Медиатека iPhone</label>
+                <label><input type="checkbox" name="can_import_android_photo_library" defaultChecked={user.can_import_android_photo_library} />Медиатека Android</label>
+              </fieldset>}
               <div className="user-edit-actions"><button className="primary" type="submit">Сохранить права</button><button className="quiet" type="button" onClick={() => setPermissionsUserId(null)}>Отмена</button></div>
             </form>}
           </div>
@@ -2474,7 +2494,7 @@ function signalNewMessage() {
   }
 }
 
-function HeaderChatButton({ onOpen }: { onOpen: () => void }) {
+function HeaderChatButton({ onOpen, active }: { onOpen: () => void; active: boolean }) {
   const [unread, setUnread] = useState(0);
   const previousUnread = useRef<number | null>(null);
 
@@ -2514,7 +2534,7 @@ function HeaderChatButton({ onOpen }: { onOpen: () => void }) {
     };
   }, []);
 
-  return <button className="header-chat" onClick={onOpen}><span aria-hidden="true">💬</span><b>Чаты</b>{unread > 0 && <i>{unread > 99 ? "99+" : unread}</i>}</button>;
+  return <button className="studio-chat-link" aria-current={active ? "page" : undefined} onClick={onOpen}>Чаты{unread > 0 && <i>{unread > 99 ? "99+" : unread}</i>}</button>;
 }
 
 const CONTENT_STATUS_LABELS: Record<ContentStatus, string> = {
@@ -3438,7 +3458,7 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled, onOpenW
       {newContentFormat !== "availability" && <label className="content-option-check"><input type="checkbox" name="no_title_on_image" /> Не включать название в изображение</label>}
       {newContentFormat !== "availability" && <label>{sourceImageEdit ? "Результат обработки" : "Тема"}<div className="voice-input-row"><input name="title" minLength={2} maxLength={180} required value={newTitle} onChange={(event) => setNewTitle(event.target.value)} placeholder={sourceImageEdit ? "Например, ретушь результата перманента губ" : "Например, результат процедуры до/после"} /><VoiceInputButton csrfToken={session.csrf_token} onAppend={(spoken) => setNewTitle((current) => appendDictatedText(current, spoken))} /></div><small className="muted">Можно надиктовать тему: нажмите «Стоп», и текст появится в поле.</small></label>}
       {newContentFormat === "availability" && <label>Мастер для окон<select name="availability_staff_id" required defaultValue=""><option value="" disabled>Выберите мастера</option>{availabilityStaff.map((entry) => <option key={entry.staff_id} value={entry.staff_id}>{entry.staff_name}{entry.specialization ? ` — ${entry.specialization}` : ""}</option>)}</select><small className="muted">Будет использован только шаблон, в комментарии к которому указан этот мастер.</small></label>}
-      {newContentFormat !== "availability" && <><label>{"Пожелания к публикации"} <small className="muted">необязательно</small><textarea name="editor_instruction" maxLength={1000} value={newEditorInstruction} onChange={(event) => setNewEditorInstruction(event.target.value)} placeholder={sourceImageEdit ? "Например: «Убери маску, добавь чёрные перчатки, сделай мягкую ретушь. Добавь золотую надпись и логотип VIOLETTA»." : "Например: «сгенерируй видео о процедуре», «сгенерируй картинку в тёмной золотой стилистике»."} /><div className="voice-input-row"><VoiceInputButton csrfToken={session.csrf_token} onAppend={(spoken) => setNewEditorInstruction((current) => appendDictatedText(current, spoken))} /></div><details><summary aria-label="Правила генерации">? Правила генерации</summary><p style={{ whiteSpace: "pre-line" }}>{"КАК ОПИСАТЬ ЗАДАЧУ\nУкажите процедуру, стиль, нужные детали и выберите фото. Например: «Создай светлый баннер о перманенте губ. Надпись: Запись открыта».\n\nКОМАНДЫ ДЛЯ КАРТИНКИ\nСлова «создай», «сгенерируй», «картинка», «изображение», «макет», «баннер», «ретушь», «надпись», «фон», «логотип», «добавь», «убери» и «замени» помогают распознать запрос на изображение.\n\nКОЛЛАЖ И ДО/ПОСЛЕ\nНапишите «коллаж», «несколько фото вместе» или «фото вместе» и выберите снимки. Для сравнения напишите «до и после», выберите сначала фото до, затем после. Без запроса на коллаж несколько выбранных файлов для сторис могут стать отдельными историями.\n\nСТИЛЬ\nВ режиме «Авто» слова «светлый», «белый», «бежевый», «нюд» подсказывают светлое оформление; «тёмный», «чёрный», «графит» — тёмное. Явный выбор стиля имеет преимущество.\n\nНАДПИСИ\nНапишите точный текст после «Надпись:» или «Текст на фото:», например «Надпись: Запись открыта». Проверьте орфографию и результат перед публикацией: ИИ может ошибаться. Буквы «ПМ» на изображении появятся только если вы укажете их в пожеланиях; они будут заглавными.\n\nОБРАБОТКА ФОТО\nВыберите фото и включите «Обработать выбранное фото с ИИ», затем опишите изменения: «Убери маску, сделай мягкую ретушь». Оригинал сохранится.\n\nДВЕ ГАЛОЧКИ\n«Не включать название в изображение» исключает название карточки, но оставляет надписи из пожеланий; для новой картинки укажите пожелания. «Без подписи под публикацией» отключает текст под постом, а не надписи на изображении. Настройки изображения действуют при следующей генерации. Reels требует готовое видео; генерация видео не поддерживается."}</p></details><small className="muted">Укажите, что создать или изменить, и напишите нужные надписи.</small></label><div className="content-source-picker"><div><strong>Фото и видео из хранилища</strong><small>{selectedSourceMedia.length ? "Выбрано: " + selectedSourceMedia.length : "Необязательно: агент подберёт разрешённые материалы сам."}</small></div><button type="button" className="quiet" onClick={() => void openContentLibrary()}>Выбрать материалы</button></div>{selectedSourceMedia.length > 0 && <section className="source-image-edit"><label><input type="checkbox" checked={sourceImageEdit} onChange={(event) => setSourceImageEdit(event.target.checked)} /> <span><strong>Обработать выбранное фото с ИИ</strong><small>Создаст новую версию: можно ретушировать, добавить или убрать детали, добавить надписи и логотип. Оригинал останется без изменений.</small></span></label></section>}{contentLibraryOpen && renderContentLibrary(selectedSourceMedia, setSelectedSourceMedia, 10)}</>}
+      {newContentFormat !== "availability" && <><label>{"Пожелания к публикации"} <small className="muted">необязательно</small><textarea name="editor_instruction" maxLength={1000} value={newEditorInstruction} onChange={(event) => setNewEditorInstruction(event.target.value)} placeholder={sourceImageEdit ? "Например: «Убери маску, добавь чёрные перчатки, сделай мягкую ретушь. Добавь золотую надпись и логотип VIOLETTA»." : "Например: «сгенерируй видео о процедуре», «сгенерируй картинку в тёмной золотой стилистике»."} /><div className="voice-input-row"><VoiceInputButton csrfToken={session.csrf_token} onAppend={(spoken) => setNewEditorInstruction((current) => appendDictatedText(current, spoken))} /></div><details><summary aria-label="Правила генерации">? Правила генерации</summary><p style={{ whiteSpace: "pre-line" }}>{"КАК ОПИСАТЬ ЗАДАЧУ\nУкажите процедуру, стиль, нужные детали и выберите фото. Например: «Создай светлый баннер о перманенте губ. Надпись: Запись открыта».\n\nКОМАНДЫ ДЛЯ КАРТИНКИ\nСлова «создай», «сгенерируй», «картинка», «изображение», «макет», «баннер», «ретушь», «надпись», «фон», «логотип», «добавь», «убери» и «замени» помогают распознать запрос на изображение.\n\nКОЛЛАЖ И ДО/ПОСЛЕ\nНапишите «коллаж», «несколько фото вместе» или «фото вместе» и выберите снимки. Для сравнения напишите «до и после», выберите сначала фото до, затем после. Без запроса на коллаж несколько выбранных файлов для сторис могут стать отдельными историями.\n\nСТИЛЬ\nВ режиме «Авто» слова «светлый», «белый», «бежевый», «нюд» подсказывают светлое оформление; «тёмный», «чёрный», «графит» — тёмное. Явный выбор стиля имеет преимущество.\n\nНАДПИСИ\nНадпись оформляет ИИ через API. Например, напишите: Надпись: «Скидка 50% до 27 ноября», мелким шрифтом внизу. В кавычках укажите слова для клиента, за кавычками — размер и положение. Проверьте написание, цены и даты на готовой картинке. Буквы «ПМ» на изображении появятся только если вы укажете их в пожеланиях; они будут заглавными.\n\nОБРАБОТКА ФОТО\nВыберите фото и включите «Обработать выбранное фото с ИИ», затем опишите изменения: «Убери маску, сделай мягкую ретушь». Оригинал сохранится.\n\nДВЕ ГАЛОЧКИ\n«Не включать название в изображение» исключает название карточки, но оставляет надписи из пожеланий; для новой картинки укажите пожелания. «Без подписи под публикацией» отключает текст под постом, а не надписи на изображении. Настройки изображения действуют при следующей генерации. Reels требует готовое видео; генерация видео не поддерживается."}</p></details><small className="muted">Укажите, что создать или изменить, и напишите нужные надписи.</small></label><div className="content-source-picker"><div><strong>Фото и видео из хранилища</strong><small>{selectedSourceMedia.length ? "Выбрано: " + selectedSourceMedia.length : "Необязательно: агент подберёт разрешённые материалы сам."}</small></div><button type="button" className="quiet" onClick={() => void openContentLibrary()}>Выбрать материалы</button></div>{selectedSourceMedia.length > 0 && <section className="source-image-edit"><label><input type="checkbox" checked={sourceImageEdit} onChange={(event) => setSourceImageEdit(event.target.checked)} /> <span><strong>Обработать выбранное фото с ИИ</strong><small>Создаст новую версию: можно ретушировать, добавить или убрать детали, добавить надписи и логотип. Оригинал останется без изменений.</small></span></label></section>}{contentLibraryOpen && renderContentLibrary(selectedSourceMedia, setSelectedSourceMedia, 10)}</>}
       <label>Фото в посте<select name="media_limit" defaultValue="1"><option value="1">1 фото</option><option value="2">2 фото</option><option value="3">3 фото</option><option value="4">4 фото</option><option value="5">5 фото</option><option value="6">6 фото</option><option value="7">7 фото</option><option value="8">8 фото</option><option value="9">9 фото</option><option value="10">10 фото</option></select><small className="muted">Для истории агент возьмёт один вертикальный материал; для «Свободных окон» — макет из папки «Шаблоны».</small></label>
       <fieldset><legend>Когда размещать</legend><label><input type="checkbox" checked={newDateAssigned} onChange={(event) => setNewDateAssigned(event.target.checked)} />Запланировать на дату и время</label></fieldset>
       {newDateAssigned ? <label>Дата и время<input name="scheduled_at" type="datetime-local" required min={dateTimeLocalValue(firstContentSlot)} defaultValue={dateTimeLocalValue(defaultSchedule)} /><small className="muted">Только будущее время. На подготовку материала автоматически заложено не менее 30 минут.</small></label> : <input type="hidden" name="scheduled_at" value={dateTimeLocalValue(defaultSchedule)} />}
@@ -3513,7 +3533,7 @@ function ContentPanel({ session, initialMediaIds, onInitialMediaHandled, onOpenW
           <h2 id="content-refinement-title">{refinementDialog.kind === "regenerate" ? "Сгенерировать заново" : refinementDialog.kind === "visual" ? "Уточнить картинку" : "Уточнить подбор материалов"}</h2>
           <p className="muted">{refinementDialog.kind === 'regenerate' ? 'Измените уточнение или оставьте его без изменений. Материал будет подготовлен заново с учётом формата и выбранных файлов.' : 'Новое уточнение добавится к исходной теме и прежним правкам — они не будут заменены.'}</p>
         </div>
-        <details><summary aria-label="Правила генерации">? Правила генерации</summary><p style={{ whiteSpace: "pre-line" }}>{"КАК ОПИСАТЬ ЗАДАЧУ\nУкажите процедуру, стиль, нужные детали и выберите фото. Например: «Создай светлый баннер о перманенте губ. Надпись: Запись открыта».\n\nКОМАНДЫ ДЛЯ КАРТИНКИ\nСлова «создай», «сгенерируй», «картинка», «изображение», «макет», «баннер», «ретушь», «надпись», «фон», «логотип», «добавь», «убери» и «замени» помогают распознать запрос на изображение.\n\nКОЛЛАЖ И ДО/ПОСЛЕ\nНапишите «коллаж», «несколько фото вместе» или «фото вместе» и выберите снимки. Для сравнения напишите «до и после», выберите сначала фото до, затем после. Без запроса на коллаж несколько выбранных файлов для сторис могут стать отдельными историями.\n\nСТИЛЬ\nВ режиме «Авто» слова «светлый», «белый», «бежевый», «нюд» подсказывают светлое оформление; «тёмный», «чёрный», «графит» — тёмное. Явный выбор стиля имеет преимущество.\n\nНАДПИСИ\nНапишите точный текст после «Надпись:» или «Текст на фото:», например «Надпись: Запись открыта». Проверьте орфографию и результат перед публикацией: ИИ может ошибаться. Буквы «ПМ» на изображении появятся только если вы укажете их в пожеланиях; они будут заглавными.\n\nОБРАБОТКА ФОТО\nВыберите фото и включите «Обработать выбранное фото с ИИ», затем опишите изменения: «Убери маску, сделай мягкую ретушь». Оригинал сохранится.\n\nДВЕ ГАЛОЧКИ\n«Не включать название в изображение» исключает название карточки, но оставляет надписи из пожеланий; для новой картинки укажите пожелания. «Без подписи под публикацией» отключает текст под постом, а не надписи на изображении. Настройки изображения действуют при следующей генерации. Reels требует готовое видео; генерация видео не поддерживается."}</p></details><label>Пожелания к публикации<textarea autoFocus value={refinementDialog.text} maxLength={1000} onChange={(event) => setRefinementDialog((current) => current ? { ...current, text: event.target.value } : current)} placeholder={refinementDialog.kind === "visual" ? "Например: «Цену 4 000 ₽ сделать крупнее и по центру нижнего золотого блока»." : "Например: «Только глаза со стрелками, без губ и пирсинга»."} /></label>
+        <details><summary aria-label="Правила генерации">? Правила генерации</summary><p style={{ whiteSpace: "pre-line" }}>{"КАК ОПИСАТЬ ЗАДАЧУ\nУкажите процедуру, стиль, нужные детали и выберите фото. Например: «Создай светлый баннер о перманенте губ. Надпись: Запись открыта».\n\nКОМАНДЫ ДЛЯ КАРТИНКИ\nСлова «создай», «сгенерируй», «картинка», «изображение», «макет», «баннер», «ретушь», «надпись», «фон», «логотип», «добавь», «убери» и «замени» помогают распознать запрос на изображение.\n\nКОЛЛАЖ И ДО/ПОСЛЕ\nНапишите «коллаж», «несколько фото вместе» или «фото вместе» и выберите снимки. Для сравнения напишите «до и после», выберите сначала фото до, затем после. Без запроса на коллаж несколько выбранных файлов для сторис могут стать отдельными историями.\n\nСТИЛЬ\nВ режиме «Авто» слова «светлый», «белый», «бежевый», «нюд» подсказывают светлое оформление; «тёмный», «чёрный», «графит» — тёмное. Явный выбор стиля имеет преимущество.\n\nНАДПИСИ\nНадпись оформляет ИИ через API. Например, напишите: Надпись: «Скидка 50% до 27 ноября», мелким шрифтом внизу. В кавычках укажите слова для клиента, за кавычками — размер и положение. Проверьте написание, цены и даты на готовой картинке. Буквы «ПМ» на изображении появятся только если вы укажете их в пожеланиях; они будут заглавными.\n\nОБРАБОТКА ФОТО\nВыберите фото и включите «Обработать выбранное фото с ИИ», затем опишите изменения: «Убери маску, сделай мягкую ретушь». Оригинал сохранится.\n\nДВЕ ГАЛОЧКИ\n«Не включать название в изображение» исключает название карточки, но оставляет надписи из пожеланий; для новой картинки укажите пожелания. «Без подписи под публикацией» отключает текст под постом, а не надписи на изображении. Настройки изображения действуют при следующей генерации. Reels требует готовое видео; генерация видео не поддерживается."}</p></details><label>Пожелания к публикации<textarea autoFocus value={refinementDialog.text} maxLength={1000} onChange={(event) => setRefinementDialog((current) => current ? { ...current, text: event.target.value } : current)} placeholder={refinementDialog.kind === "visual" ? "Например: «Цену 4 000 ₽ сделать крупнее и по центру нижнего золотого блока»." : "Например: «Только глаза со стрелками, без губ и пирсинга»."} /></label>
         <div className="voice-input-row voice-input-row-solo"><VoiceInputButton csrfToken={session.csrf_token} onAppend={(spoken) => setRefinementDialog((current) => current ? { ...current, text: appendDictatedText(current.text, spoken) } : current)} disabled={workingId === refinementDialog.item.id} /></div>
         {refinementError && <p className="error">{refinementError}</p>}
         <div className="content-form-actions"><button type="submit" disabled={workingId === refinementDialog.item.id}>{workingId === refinementDialog.item.id ? "Генерирую…" : refinementDialog.kind === "selection" ? "Уточнить подбор" : "Сгенерировать заново"}</button><button type="button" className="quiet" disabled={workingId === refinementDialog.item.id} onClick={() => setRefinementDialog(null)}>Отмена</button></div>
@@ -3601,15 +3621,12 @@ function Dashboard({ session, onLogout }: { session: Session; onLogout: () => vo
   function switchMediaMode(mode: MediaMode) {
     const hash = mode === "add" ? "#add" : "#browse";
     localStorage.setItem(mediaModeStorageKey, mode);
-    if (window.location.hash !== hash) window.history.replaceState({ screen: "main", mediaMode: mode }, "", hash);
+    if (window.location.hash !== hash) {
+      if (screen === "main") window.history.replaceState({ screen: "main", mediaMode: mode }, "", hash);
+      else window.history.pushState({ screen: "main", mediaMode: mode }, "", hash);
+    }
     setMediaMode(mode);
     setScreen("main");
-  }
-
-  function closePage() {
-    setChatMediaId(null);
-    if (["#chats", "#admin", "#content", "#windows"].includes(window.location.hash)) window.history.back();
-    else setScreen("main");
   }
 
   async function logout() {
@@ -3619,16 +3636,29 @@ function Dashboard({ session, onLogout }: { session: Session; onLogout: () => vo
 
   return (
     <main className="app-shell">
-      <header><div className="brand"><img className="mini-mark" src="/logo.svg" alt="" /><div><strong>VIOLETTA</strong><small>{screen === "chats" ? "чаты студии" : screen === "admin" ? "администрирование" : screen === "windows" ? "расписание окошек" : screen === "content" ? "контент студии" : mediaMode === "add" ? "добавление материалов" : "просмотр архива"}</small></div></div><div className="header-actions">{screen !== "main" ? <button className="header-back" onClick={closePage}>← Назад</button> : <>{session.user.can_access_content && <button className="header-content" onClick={openWindows}><span aria-hidden="true">▦</span><b>Окошки</b></button>}{session.user.can_access_content && <button className="header-content" onClick={() => openContent()}><span aria-hidden="true">✦</span><b>Контент</b></button>}{session.user.can_access_admin && <button className="header-admin" onClick={openAdmin}><span aria-hidden="true">⚙</span><b>Админка</b></button>}{session.user.can_access_chats && <HeaderChatButton onOpen={() => openChats()} />}</>}<button className="quiet" onClick={logout}>Выйти</button></div></header>
+      <header className="studio-masthead">
+        <div className="studio-bar">
+          <button type="button" className="studio-brand" onClick={() => switchMediaMode("browse")} aria-label="Violetta · открыть архив">
+            <img src="/logo.svg" alt="" /><span>VIOLETTA</span>
+          </button>
+          <div className="studio-account"><span>{session.user.display_name}</span><button type="button" onClick={logout}>Выйти</button></div>
+        </div>
+      </header>
+      <nav className="studio-nav" aria-label="Разделы студии"><div>
+        <button aria-current={screen === "main" ? "page" : undefined} onClick={() => switchMediaMode("browse")}>Медиатека</button>
+        {session.user.can_access_content && <button aria-current={screen === "content" ? "page" : undefined} onClick={() => openContent()}>Контент</button>}
+        {session.user.can_access_content && <button aria-current={screen === "windows" ? "page" : undefined} onClick={openWindows}>Окошки</button>}
+        {session.user.can_access_chats && <HeaderChatButton active={screen === "chats"} onOpen={() => openChats()} />}
+        {session.user.can_access_admin && <button aria-current={screen === "admin" ? "page" : undefined} onClick={openAdmin}>Управление</button>}
+      </div></nav>
       {screen === "chats" ? <div className="content chat-page"><DiscussionsPanel session={session} initialMediaId={chatMediaId} onInitialMediaHandled={() => setChatMediaId(null)} /></div> : screen === "admin" ? <div className="content admin-page"><AdminPanel session={session} /></div> : screen === "windows" ? <div className="content content-page"><AvailabilitySchedules session={session} onCreateOnce={() => { setContentAvailability(true); setContentMediaIds([]); setScreen("content"); window.history.pushState({ screen: "content" }, "", "#content"); }} /></div> : screen === "content" ? <div className="content content-page"><ContentPanel session={session} initialMediaIds={contentMediaIds} onInitialMediaHandled={() => setContentMediaIds([])} initialAvailability={contentAvailability} onOpenWindows={openWindows} /></div> : <div className="content">
-        <section className="welcome"><p className="eyebrow">Добро пожаловать</p><h1>{session.user.display_name}</h1><p>Рабочие папки открыты для команды, а приватные — только для приглашённых участников.</p></section>
-        <StoragePanel />
-        <AccountPanel session={session} />
+        <div className="library-heading"><h1>Медиатека</h1><StoragePanel /></div>
         <section className={`media-page-links ${session.user.can_upload_media ? "" : "single"}`} aria-label="Работа с фото и видео">
           {session.user.can_upload_media && <button className={`media-page-link add ${mediaMode === "add" ? "active" : ""}`} type="button" aria-pressed={mediaMode === "add"} onClick={() => switchMediaMode("add")}><span className="media-link-icon" aria-hidden="true">＋</span><span><small>Новые материалы</small><strong>Добавить фото и видео</strong><em>Выбрать папку, дату и визит YCLIENTS</em></span><b aria-hidden="true">↓</b></button>}
           <button className={`media-page-link browse ${mediaMode === "browse" ? "active" : ""}`} type="button" aria-pressed={mediaMode === "browse"} onClick={() => switchMediaMode("browse")}><span className="media-link-icon" aria-hidden="true">▦</span><span><small>Архив студии</small><strong>Просмотр материалов</strong><em>Папки, календарь, клиенты, даты и геометки</em></span><b aria-hidden="true">↓</b></button>
         </section>
         <MediaPanel session={session} mode={mediaMode} onCreateChat={(file) => openChats(file)} onCreateContent={(files) => openContent(files)} />
+        <AccountPanel session={session} />
       </div>}
     </main>
   );

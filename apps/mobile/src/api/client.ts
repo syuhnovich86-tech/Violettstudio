@@ -205,6 +205,8 @@ export const createUser = (payload: { display_name: string; login: string; passw
 export const updateUser = (id: string, display_name: string, loginName: string) => apiRequest<ApiUser>(`/users/${id}`, { method: 'PUT', body: JSON.stringify({ display_name, login: loginName }) }, true);
 export const resetUserPassword = (id: string, password: string) => apiRequest<void>(`/users/${id}/password`, { method: 'PUT', body: JSON.stringify({ password }) }, true);
 export const setUserActive = (id: string, is_active: boolean) => apiRequest<ApiUser>(`/users/${id}/active`, { method: 'PUT', body: JSON.stringify({ is_active }) }, true);
+export const updateOwnerPhoneSync = (ios: boolean, android: boolean) =>
+  apiRequest<ApiUser>('/users/me/phone-sync', { method: 'PUT', body: JSON.stringify({ can_import_ios_photo_library: ios, can_import_android_photo_library: android }) }, true);
 export const updatePermissions = (id: string, payload: Pick<ApiUser, 'role' | 'can_create_shared_workspaces' | 'can_create_private_workspaces' | 'can_delete_workspaces' | 'can_add_comments' | 'can_upload_media' | 'can_view_all_calendars' | 'can_access_admin' | 'can_access_chats' | 'can_access_content' | 'can_access_analytics' | 'can_import_ios_photo_library' | 'can_import_android_photo_library'>) => apiRequest<ApiUser>(`/users/${id}/permissions`, { method: 'PUT', body: JSON.stringify(payload) }, true);
 export const getIntegrations = () => apiRequest<IntegrationStatus>('/integrations');
 export const updateIntegrations = (payload: Record<string, string | null>) => apiRequest<IntegrationStatus>('/integrations', { method: 'PUT', body: JSON.stringify(payload) }, true);

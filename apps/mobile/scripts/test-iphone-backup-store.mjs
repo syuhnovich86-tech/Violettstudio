@@ -16,7 +16,7 @@ const store = await import('../src/media/iphoneBackupStore.ts');
 const { canUserImportIphoneLibrary } = await import('../src/auth/importAuthorization.ts');
 const granted = { is_active: true, can_upload_media: true, can_import_ios_photo_library: true, role: 'admin' };
 assert.equal(canUserImportIphoneLibrary(granted), true);
-assert.equal(canUserImportIphoneLibrary({ ...granted, role: 'employee' }), false);
+assert.equal(canUserImportIphoneLibrary({ ...granted, role: 'employee' }), true);
 assert.equal(canUserImportIphoneLibrary({ ...granted, can_import_ios_photo_library: false }), false);
 assert.equal(canUserImportIphoneLibrary({ ...granted, is_active: false }), false);
 

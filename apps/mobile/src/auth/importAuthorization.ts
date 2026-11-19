@@ -6,12 +6,11 @@ const IMPORT_PERMISSION_KEY = 'violetta.can-import-ios-library';
 
 export function canUserImportAndroidLibrary(user: ApiUser | null) {
   return !!user && user.is_active && user.can_upload_media &&
-    (user.role === 'owner' || user.can_import_android_photo_library === true);
+    user.can_import_android_photo_library === true;
 }
 
 export function canUserImportIphoneLibrary(user: ApiUser | null) {
   return !!user && user.is_active && user.can_upload_media &&
-    (user.role === 'owner' || user.role === 'admin') &&
     user.can_import_ios_photo_library === true;
 }
 

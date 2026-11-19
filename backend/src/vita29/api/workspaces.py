@@ -138,7 +138,7 @@ def make_android_backup_private(
     db: Annotated[Session, Depends(get_db)],
 ) -> WorkspaceResponse:
     user = auth_session.user
-    if not user.can_upload_media or (user.role.value != "owner" and not user.can_import_android_photo_library):
+    if not user.can_upload_media or not user.can_import_android_photo_library:
         raise HTTPException(status_code=403, detail="Копирование медиатеки Android недоступно")
     workspace = db.scalar(select(Workspace).where(Workspace.id == workspace_id).with_for_update())
     if workspace is None or not can_access_workspace(db, workspace, user):

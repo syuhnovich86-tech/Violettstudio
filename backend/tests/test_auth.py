@@ -269,3 +269,24 @@ def test_owner_can_assign_user_permissions(client: TestClient, tmp_path) -> None
     csrf = login(client, "rights-user")
     assert client.get("/api/v1/users").status_code == 403
     assert client.get("/api/v1/discussions").status_code == 403
+
+
+def test_only_owner_can_disable_another_admin_and_can_restore_access(client, tmp_path):
+    path = tmp_path / "test.db"
+    owner = seed_user(path, role=UserRole.OWNER, login="creator")
+    first = seed_user(path, role=UserRole.ADMIN, login="manager")
+    other = seed_user(path, role=UserRole.ADMIN, login="other-manager")
+
+    def set_active(person, active, headers):
+        return client.put(f"/api/v1/users/{person.id}/active", json={"is_active": active}, headers=headers)
+
+    admin_headers = {"X-CSRF-Token": login(client, first.login)}
+    assert set_active(other, False, admin_headers).status_code == 403
+    assert set_active(owner, False, admin_headers).status_code == 403
+    owner_headers = {"X-CSRF-Token": login(client, owner.login)}
+    assert set_active(owner, False, owner_headers).status_code == 400
+    assert set_active(other, False, owner_headers).json()["is_active"] is False
+    attempted = client.post("/api/v1/mobile/auth/login", json={"login": other.login, "password": "strong-pass-123"})
+    assert attempted.status_code in (401, 403)
+    assert set_active(other, True, owner_headers).json()["is_active"] is True
+    assert login(client, other.login)

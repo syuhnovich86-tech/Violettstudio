@@ -1336,7 +1336,7 @@ def prepare_content_item(
                     settings,
                     item,
                     user.id,
-                    item.editor_instruction or ("" if item.no_title_on_image else item.title),
+                    item.editor_instruction or "",
                     prepared_source_media,
                     copy_hint=None if item.no_title_on_image else draft.caption,
                     force_edit=item.visual_edit_requested,
@@ -1392,7 +1392,8 @@ def generate_content_visual(
     source_media: list[MediaFile] = []
     if source_ids:
         valid_ids = validate_content_media_selection(db, user, source_ids, 10)
-        source_media = db.scalars(select(MediaFile).where(MediaFile.id.in_(valid_ids))).all()
+        by_id = {media.id: media for media in db.scalars(select(MediaFile).where(MediaFile.id.in_(valid_ids)))}
+        source_media = [by_id[media_id] for media_id in valid_ids]
     # Build the chronology before calling the image generator. The previous
     # order sent only the last small note (for example, "make the price
     # larger") and saved the original brief afterwards, so the visual could

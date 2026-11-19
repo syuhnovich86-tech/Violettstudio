@@ -1,5 +1,5 @@
 import io
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -33,12 +33,13 @@ from vita29.settings import Settings
 def test_weekly_content_plan_approval_and_platform_jobs(client: TestClient, tmp_path) -> None:
     seed_user(tmp_path / "test.db", role=UserRole.OWNER)
     csrf = login(client)
+    scheduled = (datetime.now(UTC) + timedelta(days=14)).replace(hour=10, minute=0, second=0, microsecond=0)
     created = client.post(
         "/api/v1/content/items",
         headers={"X-CSRF-Token": csrf},
         json={
             "title": "Результат до и после",
-            "scheduled_at": "2026-11-03T10:00:00+03:00",
+            "scheduled_at": scheduled.isoformat(),
             "platforms": ["telegram", "max", "instagram"],
             "media_ids": [],
         },
@@ -53,7 +54,8 @@ def test_weekly_content_plan_approval_and_platform_jobs(client: TestClient, tmp_
         "instagram",
     }
 
-    listed = client.get("/api/v1/content/items?week_start=2026-11-02")
+    monday = scheduled.date() - timedelta(days=scheduled.weekday())
+    listed = client.get(f"/api/v1/content/items?week_start={monday.isoformat()}")
     assert listed.status_code == 200
     assert [entry["id"] for entry in listed.json()] == [item["id"]]
 
@@ -135,17 +137,6 @@ def test_prepare_returns_generated_text_and_image(client: TestClient, tmp_path, 
     assert result.json()["publications"][0]["caption"] == "Готовый текст"
     assert result.json()["publications"][0]["media_ids"] == ["generated-image-id"]
     assert calls == ["Готовый текст"]
-
-
-def test_before_after_without_conjunction_preserves_original_photos(monkeypatch):
-    from vita29.content import visual
-    photos = [SimpleNamespace(media_type=MediaType.IMAGE), SimpleNamespace(media_type=MediaType.IMAGE)]
-    item = SimpleNamespace(title='Перманент', visual_style='auto')
-    monkeypatch.setattr(visual, 'config_value', lambda *args: 'true')
-    monkeypatch.setattr(visual, '_before_after_collage', lambda sources, *args, **kwargs: b'collage-from-originals' if sources == photos else None)
-    monkeypatch.setattr(visual, '_save_generated_image', lambda db, settings, item, actor_id, instruction, image: image)
-    monkeypatch.setattr(visual, 'read_openai_secret', lambda *args: (_ for _ in ()).throw(AssertionError('before/after must not be redrawn')))
-    assert visual.generate_branded_visual(None, None, item, 'editor', 'Сделай коллаж Бровки до после на белом фоне', photos) == b'collage-from-originals'
 
 
 def test_dictated_banner_copy_without_colon_stops_at_next_line():
@@ -255,6 +246,7 @@ def test_instagram_uses_story_variant_only_for_story_images(monkeypatch):
     monkeypatch.setattr(instagram, 'create_temporary_public_link', lambda *args: 'https://example.test/media/token')
     monkeypatch.setattr(instagram, 'revoke_public_links', lambda *args: None)
     monkeypatch.setattr(instagram, '_wait_until_ready', lambda *args, **kwargs: None)
+    monkeypatch.setattr(instagram, '_persist_confirmation', lambda *args, **kwargs: None)
     def call(method, path, **kwargs):
         if path.endswith('/media'):
             seen.append(kwargs['data']['image_url'])

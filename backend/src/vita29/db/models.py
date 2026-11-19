@@ -92,6 +92,10 @@ class PublicationStatus(str, enum.Enum):
     FAILED = "failed"
 
 
+def phone_sync_role_default(context) -> bool:
+    return context.get_current_parameters().get("role") in (UserRole.OWNER, UserRole.ADMIN)
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -111,8 +115,8 @@ class User(Base):
     can_access_chats: Mapped[bool] = mapped_column(Boolean, default=True)
     can_access_content: Mapped[bool] = mapped_column(Boolean, default=False)
     can_access_analytics: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
-    can_import_ios_photo_library: Mapped[bool] = mapped_column(Boolean, default=False)
-    can_import_android_photo_library: Mapped[bool] = mapped_column(Boolean, default=False)
+    can_import_ios_photo_library: Mapped[bool] = mapped_column(Boolean, default=phone_sync_role_default)
+    can_import_android_photo_library: Mapped[bool] = mapped_column(Boolean, default=phone_sync_role_default)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, onupdate=utc_now

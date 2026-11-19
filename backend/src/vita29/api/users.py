@@ -56,7 +56,7 @@ class UpdatePermissionsRequest(BaseModel):
     can_access_chats: bool
     can_access_content: bool = False
     can_access_analytics: bool | None = None
-    can_import_ios_photo_library: bool = False
+    can_import_ios_photo_library: bool | None = None
     can_import_android_photo_library: bool | None = None
 
 
@@ -105,7 +105,8 @@ def create_user(
         can_access_admin=payload.role == UserRole.ADMIN,
         can_access_chats=True,
         can_access_content=False,
-        can_import_ios_photo_library=False,
+        can_import_ios_photo_library=payload.role == UserRole.ADMIN,
+        can_import_android_photo_library=payload.role == UserRole.ADMIN,
     )
     persist_user(db, user)
     db.add(
@@ -215,10 +216,10 @@ def set_active(
     user = db.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    if user.role == UserRole.OWNER:
-        raise HTTPException(status_code=400, detail="The owner account cannot be deactivated")
     if user.id == admin.id and not payload.is_active:
-        raise HTTPException(status_code=400, detail="Cannot deactivate your own account")
+        raise HTTPException(status_code=400, detail="Свою учётную запись отключить нельзя")
+    if user.role == UserRole.OWNER:
+        raise HTTPException(status_code=403, detail="Учётная запись владельца защищена")
     if user.role == UserRole.ADMIN and admin.role != UserRole.OWNER:
         raise HTTPException(status_code=403, detail="Only the owner can manage administrators")
     user.is_active = payload.is_active
@@ -234,6 +235,31 @@ def set_active(
     db.refresh(user)
     if not user.is_active:
         revoke_user_sessions(db, user.id)
+    return user_response(user)
+
+
+class PhoneSyncPermissions(BaseModel):
+    can_import_ios_photo_library: bool
+    can_import_android_photo_library: bool
+
+
+@router.put("/me/phone-sync", response_model=UserResponse)
+def update_owner_phone_sync(
+    payload: PhoneSyncPermissions,
+    _: Annotated[AuthSession, Depends(require_csrf)],
+    user: Annotated[User, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> UserResponse:
+    if user.role != UserRole.OWNER:
+        raise HTTPException(status_code=403, detail="Only the owner can edit protected owner permissions")
+    changes = payload.model_dump()
+    previous = {key: getattr(user, key) for key in changes}
+    for key, value in changes.items():
+        setattr(user, key, value)
+    db.add(AuditLog(actor_id=user.id, action="user.phone_sync.update", target_type="user",
+                    target_id=user.id, details=json.dumps({"from": previous, "to": changes})))
+    db.commit()
+    db.refresh(user)
     return user_response(user)
 
 
@@ -284,16 +310,14 @@ def update_permissions(
         if admin.role != UserRole.OWNER and payload.can_access_analytics != user.can_access_analytics:
             raise HTTPException(status_code=403, detail="Only the owner can change analytics access")
         user.can_access_analytics = payload.can_access_analytics
-    if payload.can_import_ios_photo_library and admin.role != UserRole.OWNER:
-        raise HTTPException(
-            status_code=403,
-            detail="Only the owner can grant iPhone library import",
-        )
-    user.can_import_ios_photo_library = payload.can_import_ios_photo_library
-    if payload.can_import_android_photo_library is not None:
-        if admin.role != UserRole.OWNER and payload.can_import_android_photo_library != user.can_import_android_photo_library:
-            raise HTTPException(status_code=403, detail="Only the owner can change Android library import")
-        user.can_import_android_photo_library = payload.can_import_android_photo_library
+    for field in ("can_import_ios_photo_library", "can_import_android_photo_library"):
+        enabled = getattr(payload, field)
+        if enabled is None and payload.role.value != previous["role"]:
+            enabled = payload.role == UserRole.ADMIN
+        if enabled is not None and enabled != getattr(user, field):
+            if admin.role not in (UserRole.OWNER, UserRole.ADMIN):
+                raise HTTPException(status_code=403, detail="Only administrators can change phone sync")
+            setattr(user, field, enabled)
     db.add(
         AuditLog(
             actor_id=admin.id,

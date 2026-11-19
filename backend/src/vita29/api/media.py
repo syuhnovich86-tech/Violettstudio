@@ -470,7 +470,6 @@ def _scoped_ios_import_key(request: Request, user: User, workspace: Workspace, s
         not request.headers.get("authorization", "").lower().startswith("bearer ")
         or not user.is_active
         or not user.can_upload_media
-        or user.role not in (UserRole.OWNER, UserRole.ADMIN)
         or not user.can_import_ios_photo_library
     ):
         raise HTTPException(status_code=403, detail="iPhone library import is disabled")
@@ -485,7 +484,7 @@ def _scoped_android_import_key(request: Request, user: User, workspace: Workspac
         raise HTTPException(status_code=400, detail="Invalid Android import key")
     if (not request.headers.get("authorization", "").lower().startswith("bearer ")
         or not user.is_active or not user.can_upload_media
-        or (user.role != UserRole.OWNER and not user.can_import_android_photo_library)):
+        or not user.can_import_android_photo_library):
         raise HTTPException(status_code=403, detail="Android library import is disabled")
     if workspace.kind != WorkspaceKind.PRIVATE and not (workspace.kind == WorkspaceKind.STUDIO and workspace.id == "7277b107-5194-4337-b62a-7fb96d053f05"):
         raise HTTPException(status_code=403, detail="Для синхронизации выберите личную папку или «Телефон студии»")
@@ -554,8 +553,8 @@ def upload_media(
     if (
         request.headers.get("authorization", "").lower().startswith("bearer ")
         and workspace.display_name == settings.import_workspace_name
-        and user.role != UserRole.OWNER
         and not user.can_import_ios_photo_library
+        and request.headers.get("x-android-import-key") is None
     ):
         raise HTTPException(status_code=403, detail="iPhone library import is disabled")
 

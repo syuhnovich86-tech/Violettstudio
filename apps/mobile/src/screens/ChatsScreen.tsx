@@ -81,9 +81,9 @@ export function ChatsScreen({ route, navigation }: BottomTabScreenProps<RootTabs
     const body = message.trim() || null; const selectedAttachments = [...attachments]; const replyId = reply?.id;
     await mutate(async () => { await sendMessage(active.id, body, selectedAttachments, replyId, active.batch_id); setMessage(''); setAttachments([]); setReply(null); });
   }
-  if (!user?.can_access_chats) return <Screen><PageHeader kicker="Общение" title="Чаты" subtitle="Командные обсуждения и комментарии" /><Empty icon="lock-closed-outline" title="Нет доступа к чатам" text="Администратор может включить это право в настройках пользователя." /></Screen>;
+  if (!user?.can_access_chats) return <Screen><PageHeader title="Чаты" subtitle="Командные обсуждения и комментарии" /><Empty icon="lock-closed-outline" title="Нет доступа к чатам" text="Администратор может включить это право в настройках пользователя." /></Screen>;
   return <Screen>
-    <PageHeader kicker="Общение" title="Чаты" subtitle={`${notifications.data?.unread_count ?? 0} непрочитанных уведомлений`} action="create-outline" onAction={() => setCreateOpen(true)} />
+    <PageHeader title="Чаты" subtitle={`${notifications.data?.unread_count ?? 0} непрочитанных уведомлений`} action="create-outline" onAction={() => setCreateOpen(true)} />
     {(Platform.OS === 'android' || Platform.OS === 'ios') ? <Field label="Поиск чата или клиента" value={chatSearch} onChangeText={setChatSearch} placeholder="Название или клиент" /> : null}
     <View style={styles.filters}>{([['all', (Platform.OS === 'android' || Platform.OS === 'ios') ? 'Чаты' : 'Все'], ['comments', 'Комментарии'], ['private', (Platform.OS === 'android' || Platform.OS === 'ios') ? 'Приватные' : 'Личные']] as const).map(([key, label]) => <Pressable key={key} onPress={() => setFilter(key)} style={[styles.filter, filter === key && styles.filterActive]}><Text style={[styles.filterText, filter === key && styles.filterTextActive]}>{label}</Text></Pressable>)}</View>
     {(Platform.OS === 'android' || Platform.OS === 'ios') && filter === 'comments' ? <View style={styles.composerNote}><Text style={styles.replyAuthor}>Упомянули меня</Text><Switch accessibilityLabel="Показывать только упоминания" value={mentionsOnly} onValueChange={setMentionsOnly} /></View> : null}

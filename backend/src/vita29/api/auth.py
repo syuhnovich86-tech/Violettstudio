@@ -73,10 +73,8 @@ def user_response(user: User) -> UserResponse:
         can_access_chats=user.role.value == "owner" or user.can_access_chats,
         can_access_content=user.role.value == "owner" or user.can_access_content,
         can_access_analytics=user.role.value in ("owner", "admin") or user.can_access_analytics,
-        can_import_android_photo_library=(user.role.value == "owner" or user.can_import_android_photo_library),
-        can_import_ios_photo_library=(
-            user.role.value == "owner" or user.can_import_ios_photo_library
-        ),
+        can_import_android_photo_library=user.can_import_android_photo_library,
+        can_import_ios_photo_library=user.can_import_ios_photo_library,
     )
 
 

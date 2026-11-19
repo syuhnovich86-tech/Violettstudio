@@ -1,6 +1,6 @@
 import type { PropsWithChildren } from 'react';
 import { createContext, useContext, useEffect, useMemo, useState } from 'react';
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 
 import { ApiError, login as apiLogin, logout as apiLogout, restoreSession, type ApiUser } from '../api/client';
 
@@ -26,6 +26,22 @@ export function AuthProvider({ children }: PropsWithChildren) {
       })
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !user?.id) return;
+    let active = true;
+    const userId = user.id;
+    const refresh = async () => {
+      if (AppState.currentState !== 'active') return;
+      try {
+        const session = await restoreSession();
+        if (active && session.user.id === userId) setUser(session.user);
+      } catch { /* Keep the current session during a temporary network outage. */ }
+    };
+    const subscription = AppState.addEventListener('change', (state) => { if (state === 'active') void refresh(); });
+    const timer = setInterval(() => void refresh(), 60_000);
+    return () => { active = false; subscription.remove(); clearInterval(timer); };
+  }, [user?.id]);
 
   const value = useMemo<AuthState>(() => ({
     user,
