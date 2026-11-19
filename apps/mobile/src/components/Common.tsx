@@ -6,8 +6,8 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { colors, typography } from '../theme';
 import { HelpButton } from './HelpGuide';
 
-export function PrimaryButton({ title, icon, onPress, disabled = false, tone = 'gold' }: { title: string; icon?: keyof typeof Ionicons.glyphMap; onPress: () => void; disabled?: boolean; tone?: 'gold' | 'ink' | 'danger' }) {
-  return <Pressable accessibilityRole="button" disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.button, tone === 'ink' && styles.buttonInk, tone === 'danger' && styles.buttonDanger, (pressed || disabled) && styles.faded]}>
+export function PrimaryButton({ title, icon, onPress, disabled = false, tone = 'gold' }: { title: string; icon?: keyof typeof Ionicons.glyphMap; onPress: () => void; disabled?: boolean; tone?: 'gold' | 'ink' | 'danger' | 'quiet' }) {
+  return <Pressable accessibilityRole="button" disabled={disabled} onPress={onPress} style={({ pressed }) => [styles.button, tone === 'quiet' && styles.buttonQuiet, tone === 'ink' && styles.buttonInk, tone === 'danger' && styles.buttonDanger, (pressed || disabled) && styles.faded]}>
     {icon ? <Ionicons name={icon} size={18} color={tone === 'ink' ? colors.white : colors.ink} /> : null}
     <Text style={[styles.buttonText, tone === 'ink' && styles.buttonTextLight]}>{title}</Text>
   </Pressable>;
@@ -45,6 +45,7 @@ export function formatBytes(bytes: number) {
 
 const styles = StyleSheet.create({
   button: { minHeight: 48, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 12, backgroundColor: colors.honey, flexDirection: 'row', gap: 8, alignItems: 'center', justifyContent: 'center', marginVertical: 5 },
+  buttonQuiet: { backgroundColor: colors.white, borderWidth: 1, borderColor: colors.line },
   buttonInk: { backgroundColor: colors.ink },
   buttonDanger: { backgroundColor: colors.dangerSoft, borderWidth: 1, borderColor: '#DEBAB2' },
   buttonText: { flexShrink: 1, color: colors.ink, fontSize: 15, fontWeight: '600', textAlign: 'center' },

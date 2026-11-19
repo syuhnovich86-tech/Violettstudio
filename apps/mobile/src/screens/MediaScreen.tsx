@@ -33,6 +33,7 @@ export function MediaScreen({ route, navigation }: BottomTabScreenProps<RootTabs
   const [place, setPlace] = useState<string | undefined>();
   const [clientName, setClientName] = useState('');
   const [procedure, setProcedure] = useState('');
+  const [compactGallery, setCompactGallery] = useState(false);
   const [filterSheet, setFilterSheet] = useState(false);
   const [extraFilters, setExtraFilters] = useState(false);
   const [browseYear, setBrowseYear] = useState<number | undefined>();
@@ -86,13 +87,13 @@ export function MediaScreen({ route, navigation }: BottomTabScreenProps<RootTabs
     finally { setBusy(false); }
   }
   return <Screen scrollRef={scrollRef} onScroll={(event) => { const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent; if (contentOffset.y + layoutMeasurement.height > contentSize.height - 600 && media.hasNextPage && !media.isFetchingNextPage) void media.fetchNextPage(); }} overlay={workspaceId && !year && !month && !place && !clientName && !procedure && !search && !filterSheet ? <YearRail years={yearsRef.current} selected={browseYear} onSelect={(value) => { setBrowseYear(value); scrollRef.current?.scrollTo({ y: Math.max(0, resultsY.current - 12), animated: false }); }} /> : undefined}>
-    <PageHeader title="Архив" subtitle={route.params?.visitId ? 'Материалы выбранного визита' : 'Папки и файлы студии'} action="add-outline" onAction={() => setFolderSheet(true)} />
+    <PageHeader editorial title="Архив" subtitle={route.params?.visitId ? 'Материалы выбранного визита' : 'Папки и файлы студии'} action="add-outline" onAction={() => setFolderSheet(true)} />
     <View style={styles.search}><Ionicons name="search" size={18} color={colors.muted} /><TextInput value={search} onChangeText={(value) => { setBrowseYear(undefined); setSearch(value); }} placeholder="Поиск по файлам и комментариям" placeholderTextColor={colors.muted} style={styles.searchInput} /></View>
     {workspaces.isLoading ? <Busy label="Загружаю папки…" /> : workspaces.error ? <ErrorState message={(workspaces.error as Error).message} onRetry={() => void workspaces.refetch()} /> : <View style={styles.folders}>
       <Pressable onPress={() => setWorkspaceId('')} style={[styles.folder, !workspaceId && styles.folderActive]}><Ionicons name="albums-outline" size={18} color={!workspaceId ? colors.white : colors.gold} /><Text numberOfLines={1} style={[styles.folderText, !workspaceId && styles.folderTextActive]}>Все</Text></Pressable>
       {(workspaces.data ?? []).filter((folder) => !workspaceId || folder.id === workspaceId).map((folder) => <Pressable key={folder.id} onPress={() => setWorkspaceId(folder.id)} style={[styles.folder, workspaceId === folder.id && styles.folderActive]}><Ionicons name={folder.kind === 'private' ? 'lock-closed-outline' : 'folder-open-outline'} size={18} color={workspaceId === folder.id ? colors.white : colors.gold} /><View style={styles.folderCopy}><Text numberOfLines={1} style={[styles.folderText, workspaceId === folder.id && styles.folderTextActive]}>{folder.display_name}</Text><Text style={[styles.folderCount, workspaceId === folder.id && styles.folderTextActive]}>{folder.file_count} · {formatBytes(folder.size_bytes)}</Text></View></Pressable>)}
     </View>}
-    {(Platform.OS === 'android' || Platform.OS === 'ios') && workspaceId ? <View onLayout={(event) => { filterY.current = event.nativeEvent.layout.y; }}><PrimaryButton title={`Фильтры архива${year || month || place || clientName || procedure ? ' • выбраны' : ''}${filterSheet ? ' ↑' : ' ↓'}`} icon="filter-outline" onPress={() => { const opening = !filterSheet; setFilterSheet(opening); if (opening) setTimeout(() => scrollRef.current?.scrollTo({ y: Math.max(0, filterY.current - 8), animated: true }), 120); }} /></View> : null}
+    {(Platform.OS === 'android' || Platform.OS === 'ios') && workspaceId ? <View onLayout={(event) => { filterY.current = event.nativeEvent.layout.y; }}><PrimaryButton title={`Фильтры архива${year || month || place || clientName || procedure ? ' • выбраны' : ''}${filterSheet ? ' ↑' : ' ↓'}`} icon="filter-outline" tone="quiet" onPress={() => { const opening = !filterSheet; setFilterSheet(opening); if (opening) setTimeout(() => scrollRef.current?.scrollTo({ y: Math.max(0, filterY.current - 8), animated: true }), 120); }} /></View> : null}
     {workspaceId && browseYear !== undefined && !year ? <Pressable onPress={() => setBrowseYear(undefined)} style={styles.browseNote}><Text style={styles.kindText}>Переход к {browseYear} году · показать все годы</Text></Pressable> : null}
     {filterSheet && workspaceId ? <View style={styles.filterPanel}>
       {filterOptions.isLoading ? <Busy label="Загружаю фильтры…" /> : filterOptions.error ? <ErrorState message={(filterOptions.error as Error).message} onRetry={() => void filterOptions.refetch()} /> : <>
@@ -108,15 +109,19 @@ export function MediaScreen({ route, navigation }: BottomTabScreenProps<RootTabs
 
       </>}
     </View> : null}
-    {(Platform.OS === 'android' || Platform.OS === 'ios') && workspaceId && !filterSheet && user?.can_upload_media ? <PrimaryButton title="Добавить фото из галереи" icon="images-outline" onPress={() => navigation.navigate('Add', { workspaceId })} /> : null}
+    {(Platform.OS === 'android' || Platform.OS === 'ios') && workspaceId && !filterSheet && user?.can_upload_media ? <PrimaryButton title="Добавить фото из галереи" tone="ink" icon="images-outline" onPress={() => navigation.navigate('Add', { workspaceId })} /> : null}
     {(Platform.OS === 'android' || Platform.OS === 'ios') && workspaceId && !filterSheet && user?.can_delete_workspaces ? <PrimaryButton title="Удалить выбранную папку" icon="trash-outline" tone="danger" disabled={busy} onPress={() => {
       const folder = workspaces.data?.find((entry) => entry.id === workspaceId);
       if (!folder) return;
       Alert.alert(`Удалить папку «${folder.display_name}»?`, `Папка и все её файлы (${folder.file_count}) будут удалены. Файлы будут перемещены в корзину сервера.`, [{ text: 'Отмена', style: 'cancel' }, { text: 'Удалить', style: 'destructive', onPress: () => void perform(async () => { await deleteWorkspace(folder.id); setWorkspaceId(''); }, 'Папка и её файлы удалены') }]);
     }} /> : null}
     <View onLayout={(event) => { resultsY.current = event.nativeEvent.layout.y; }}>
+    {visible.length > 0 && <View style={styles.galleryToolbar}>
+      <Text accessibilityRole="header" style={styles.galleryTitle}>Фото и видео</Text>
+      <View style={styles.densityGroup}>{[false, true].map((compact) => <Pressable key={String(compact)} accessibilityRole="button" accessibilityLabel={compact ? 'Компактные миниатюры' : 'Крупные миниатюры'} accessibilityState={{ selected: compact === compactGallery }} onPress={() => setCompactGallery(compact)} style={[styles.densityButton, compact === compactGallery && styles.densityActive]}><Ionicons name={compact ? 'apps-outline' : 'grid-outline'} size={18} color={compact === compactGallery ? colors.cream : colors.ink} /></Pressable>)}</View>
+    </View>}
     {media.isLoading ? <Busy label="Загружаю фотографии и видео…" /> : media.error ? <ErrorState message={(media.error as Error).message} onRetry={() => void media.refetch()} /> : visible.length === 0 ? <Empty title="Файлов пока нет" text="Добавьте материалы через центральную кнопку камеры или выберите другую папку." /> : <View style={styles.grid}>
-      {visible.map((item) => <Pressable accessibilityRole="button" key={item.id} onPress={() => setSelected(item)} style={styles.tile}>
+      {visible.map((item) => <Pressable accessibilityRole="button" key={item.id} onPress={() => setSelected(item)} style={[styles.tile, compactGallery && styles.compactTile]}>
         <ProtectedImage path={`/media/${item.id}/thumbnail`} style={styles.thumb} />
         {item.media_type === 'video' ? <View style={styles.videoMark}><Ionicons name="play" size={15} color={colors.white} /></View> : null}
         {item.content_marked ? <View style={styles.contentMark}><Ionicons name="sparkles" size={13} color={colors.ink} /></View> : null}
@@ -170,7 +175,12 @@ const styles = StyleSheet.create({
   folder: { minHeight: 54, maxWidth: '100%', flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 16, backgroundColor: colors.white, borderWidth: 1, borderColor: colors.line },
   folderActive: { backgroundColor: colors.ink, borderColor: colors.ink }, folderCopy: { maxWidth: 150 },
   folderText: { color: colors.ink, fontSize: 12, fontWeight: '800' }, folderTextActive: { color: colors.white }, folderCount: { color: colors.muted, fontSize: 9, marginTop: 2 },
-  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  galleryToolbar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 12, marginBottom: 10 },
+  galleryTitle: { fontFamily: typography.serif, fontSize: 23, color: colors.ink },
+  densityGroup: { flexDirection: 'row', borderRadius: 22, padding: 2, backgroundColor: colors.creamStrong },
+  densityButton: { minWidth: 44, minHeight: 44, borderRadius: 22, alignItems: 'center', justifyContent: 'center' },
+  densityActive: { backgroundColor: colors.ink }, compactTile: { width: '31.5%', borderRadius: 11 },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
   more: { width: '100%' },
   tile: { width: '48.4%', borderRadius: 18, overflow: 'hidden', backgroundColor: colors.white, borderWidth: 1, borderColor: colors.line },
   thumb: { width: '100%', aspectRatio: 1 },

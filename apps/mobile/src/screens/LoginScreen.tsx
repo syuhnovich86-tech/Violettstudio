@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { ActivityIndicator, Image, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
+import { StudioRule } from '../components/StudioRule';
 import { useAuth } from '../auth/AuthProvider';
 import { colors, typography } from '../theme';
 
@@ -31,7 +32,7 @@ export function LoginScreen() {
   return (
     <SafeAreaView style={styles.safe}>
       <KeyboardAvoidingView style={styles.container} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <View style={styles.brand}><Image source={Platform.OS === 'android' ? { uri: 'assets_violettaemblemcirclev3' } : emblemAsset} resizeMode="cover" style={styles.mark} /><Text style={styles.kicker}>МЕДИАЦЕНТР СТУДИИ</Text><Text style={styles.title}>VIOLETTA</Text><Text style={styles.subtitle}>Календарь, съёмка и вся медиатека в одном приложении</Text></View>
+        <View style={styles.brand}><Image source={Platform.OS === 'android' ? { uri: 'assets_violettaemblemcirclev3' } : emblemAsset} resizeMode="cover" style={styles.mark} /><Text style={styles.kicker}>МЕДИАЦЕНТР СТУДИИ</Text><Text style={styles.title}>VIOLETTA</Text><Text style={styles.subtitle}>Календарь, съёмка и вся медиатека в одном приложении</Text><StudioRule /></View>
         <View style={styles.form}>
           <View style={styles.field}><Ionicons name="person-outline" size={19} color={colors.gold} /><TextInput value={login} onChangeText={setLogin} autoCapitalize="none" autoCorrect={false} placeholder="Логин" placeholderTextColor={colors.muted} style={styles.input} /></View>
           <View style={styles.field}><Ionicons name="lock-closed-outline" size={19} color={colors.gold} /><TextInput value={password} onChangeText={setPassword} secureTextEntry autoCapitalize="none" autoCorrect={false} textContentType="password" placeholder="Пароль" placeholderTextColor={colors.muted} style={styles.input} onSubmitEditing={() => void submit()} /></View>

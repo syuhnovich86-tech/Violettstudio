@@ -3,14 +3,15 @@ import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { colors, typography } from '../theme';
 import { useAppChrome } from './AppChrome';
+import { StudioRule } from './StudioRule';
 import { HelpButton } from './HelpGuide';
 
-export function PageHeader({ title, subtitle, action, onAction }: { title: string; subtitle: string; action?: keyof typeof Ionicons.glyphMap; onAction?: () => void }) {
+export function PageHeader({ title, subtitle, action, onAction, editorial = false }: { editorial?: boolean; title: string; subtitle: string; action?: keyof typeof Ionicons.glyphMap; onAction?: () => void }) {
   const { openProfile } = useAppChrome();
   return (
-    <View style={styles.header}>
+    <View style={[styles.header, editorial && styles.editorial]}>
       <View style={styles.toolbar}>
-        <Text style={styles.wordmark} accessibilityLabel="Violetta">VIOLETTA</Text>
+        <Text style={[styles.wordmark, editorial && styles.gold]} accessibilityLabel="Violetta">VIOLETTA</Text>
         <View style={styles.actions}>
         <HelpButton topic={title} />
         {action ? <Pressable accessibilityLabel={action === 'sync-outline' ? 'Обновить расписание' : action === 'create-outline' ? 'Создать чат' : 'Добавить папку'} accessibilityRole="button" onPress={onAction} style={({ pressed }) => [styles.action, pressed && styles.pressed]}>
@@ -21,14 +22,17 @@ export function PageHeader({ title, subtitle, action, onAction }: { title: strin
         </Pressable>
         </View>
       </View>
-      <Text accessibilityRole="header" style={styles.title}>{title}</Text>
-      <Text style={styles.subtitle}>{subtitle}</Text>
+      <Text accessibilityRole="header" style={[styles.title, editorial && styles.light]}>{title}</Text>
+      <Text style={[styles.subtitle, editorial && styles.soft]}>{subtitle}</Text>
+      {editorial && <StudioRule />}
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   header: { marginBottom: 18, paddingBottom: 16, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.gold },
+  editorial: { backgroundColor: '#27231F', borderRadius: 20, borderBottomWidth: 0, paddingHorizontal: 18, paddingTop: 13, paddingBottom: 17 },
+  gold: { color: colors.honey }, light: { color: colors.cream }, soft: { color: '#DFD7CC' },
   toolbar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, marginBottom: 12 },
   wordmark: { color: colors.ink, fontFamily: typography.serif, fontSize: 15, letterSpacing: 2.4 },
   title: { color: colors.ink, fontFamily: typography.serif, fontSize: 36, letterSpacing: -1 },
