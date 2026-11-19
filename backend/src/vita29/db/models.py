@@ -367,6 +367,7 @@ class DiscussionMessage(Base):
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_automatic: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     reply_to_id: Mapped[str | None] = mapped_column(
         ForeignKey("discussion_message.id", ondelete="SET NULL"), nullable=True, index=True
     )

@@ -1,5 +1,5 @@
-from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
+from sqlalchemy import Select, delete, select
+from sqlalchemy.orm import InstrumentedAttribute, Session
 
 from vita29.db.models import (
     Discussion,
@@ -17,6 +17,13 @@ from vita29.db.models import (
     utc_now,
 )
 from vita29.workspaces.access import can_access_workspace
+
+
+def visible_messages(discussion_id: str | InstrumentedAttribute[str]) -> Select[tuple[DiscussionMessage]]:
+    return select(DiscussionMessage).where(
+        DiscussionMessage.discussion_id == discussion_id,
+        DiscussionMessage.is_automatic.is_(False),
+    )
 
 
 def active_users(db: Session) -> list[User]:
@@ -138,20 +145,17 @@ def ensure_comment_discussion(
     fallback_comment: str,
 ) -> Discussion:
     discussion = db.scalar(select(Discussion).where(Discussion.batch_id == batch.id))
-    if discussion is None:
+    if discussion is None or not db.scalar(visible_messages(discussion.id).exists().select()):
         visit = db.get(YclientsVisit, batch.yclients_record_id) if batch.yclients_record_id else None
         client_name = visit.client_display_name if visit is not None else None
         short_comment = " ".join(fallback_comment.split())
         if len(short_comment) > 80:
             short_comment = f"{short_comment[:77]}…"
-        discussion = Discussion(
-            title=f"Серия: {client_name}" if client_name else f"Комментарий: {short_comment}",
-            kind=DiscussionKind.BATCH,
-            created_by_id=creator.id,
-            batch_id=batch.id,
-            client_name=client_name,
-        )
-        db.add(discussion)
+        if discussion is None:
+            discussion = Discussion(kind=DiscussionKind.BATCH, created_by_id=creator.id, batch_id=batch.id)
+            db.add(discussion)
+        discussion.title = f"Серия: {client_name}" if client_name else f"Комментарий: {short_comment}"
+        discussion.client_name = client_name
         db.flush()
     sync_comment_members(db, discussion, batch)
     return discussion
@@ -162,8 +166,6 @@ def add_media_comment_message(
     media: MediaFile,
     creator: User,
     comment: str,
-    *,
-    notify: bool = True,
 ) -> DiscussionMessage:
     batch = db.get(MediaBatch, media.batch_id) if media.batch_id else None
     if batch is None:
@@ -191,21 +193,13 @@ def add_media_comment_message(
     for member in members:
         if member.id == creator.id:
             continue
-        if notify:
-            kind = (
-                "media.comment.mention"
-                if f"@{member.display_name.casefold()}" in lowered
-                else "media.comment"
-            )
-            db.add(
-                Notification(
-                    user_id=member.id,
-                    kind=kind,
-                    discussion_id=discussion.id,
-                    message_id=message.id,
-                    actor_id=creator.id,
-                )
-            )
+        kind = (
+            "media.comment.mention" if f"@{member.display_name.casefold()}" in lowered else "media.comment"
+        )
+        db.add(Notification(
+            user_id=member.id, kind=kind, discussion_id=discussion.id,
+            message_id=message.id, actor_id=creator.id,
+        ))
     own_member = db.get(DiscussionMember, (discussion.id, creator.id))
     if own_member is not None:
         own_member.last_read_message_id = message.id
@@ -219,8 +213,7 @@ def attach_media_to_batch_comment(db: Session, media: MediaFile) -> None:
     if discussion is None:
         return
     message = db.scalar(
-        select(DiscussionMessage)
-        .where(DiscussionMessage.discussion_id == discussion.id)
+        visible_messages(discussion.id)
         .order_by(DiscussionMessage.created_at)
         .limit(1)
     )
@@ -236,31 +229,15 @@ def attach_media_to_batch_comment(db: Session, media: MediaFile) -> None:
         db.add(DiscussionAttachment(message_id=message.id, media_id=media.id))
 
 
-def backfill_comment_messages(db: Session) -> None:
-    for media in db.scalars(
-        select(MediaFile).where(
-            MediaFile.comment.is_not(None),
-            MediaFile.deleted_at.is_(None),
+def sync_batch_discussions(db: Session) -> None:
+    # Individual comments enter chat only when saved by a person in update_comment.
+    # A media description can also come from a generator or an import.
+    discussions = db.scalars(
+        select(Discussion).join(MediaBatch, MediaBatch.id == Discussion.batch_id).where(
+            Discussion.kind == DiscussionKind.BATCH,
+            MediaBatch.comment.is_not(None) | visible_messages(Discussion.id).exists(),
         )
-    ):
-        existing_attachment = db.scalar(
-            select(DiscussionAttachment.id)
-            .join(DiscussionMessage, DiscussionMessage.id == DiscussionAttachment.message_id)
-            .join(Discussion, Discussion.id == DiscussionMessage.discussion_id)
-            .where(
-                DiscussionAttachment.media_id == media.id,
-                Discussion.kind == DiscussionKind.BATCH,
-            )
-            .limit(1)
-        )
-        if existing_attachment is not None:
-            continue
-        creator = db.get(User, media.uploaded_by_id) if media.uploaded_by_id else None
-        creator = creator or db.get(User, media.owner_id)
-        if creator is not None and media.comment:
-            add_media_comment_message(db, media, creator, media.comment, notify=False)
-
-    discussions = db.scalars(select(Discussion).where(Discussion.kind == DiscussionKind.BATCH)).all()
+    ).all()
     for discussion in discussions:
         if not discussion.batch_id:
             continue
@@ -269,8 +246,7 @@ def backfill_comment_messages(db: Session) -> None:
             continue
         sync_comment_members(db, discussion, batch)
         message = db.scalar(
-            select(DiscussionMessage)
-            .where(DiscussionMessage.discussion_id == discussion.id)
+            visible_messages(discussion.id)
             .order_by(DiscussionMessage.created_at)
             .limit(1)
         )

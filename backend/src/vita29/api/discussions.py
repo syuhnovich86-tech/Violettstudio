@@ -31,8 +31,9 @@ from vita29.discussions.push import public_vapid_key, send_push_notifications
 from vita29.discussions.service import (
     active_users,
     add_members,
-    backfill_comment_messages,
     ensure_general_discussion,
+    sync_batch_discussions,
+    visible_messages,
 )
 from vita29.settings import Settings, get_settings
 from vita29.workspaces.access import can_access_workspace
@@ -166,28 +167,13 @@ def discussion_response(db: Session, discussion: Discussion, user: User) -> Disc
         )
     )
     last_read = db.get(DiscussionMessage, member.last_read_message_id) if member.last_read_message_id else None
-    unread_query = select(func.count()).select_from(DiscussionMessage).where(
-        DiscussionMessage.discussion_id == discussion.id,
-        DiscussionMessage.author_id != user.id,
-    )
+    messages = visible_messages(discussion.id)
+    unread = messages.where(DiscussionMessage.author_id != user.id)
     if last_read is not None:
-        unread_query = unread_query.where(DiscussionMessage.created_at > last_read.created_at)
-    unread_count = int(db.scalar(unread_query) or 0)
-    first_unread_query = select(DiscussionMessage).where(
-        DiscussionMessage.discussion_id == discussion.id,
-        DiscussionMessage.author_id != user.id,
-    )
-    if last_read is not None:
-        first_unread_query = first_unread_query.where(
-            DiscussionMessage.created_at > last_read.created_at
-        )
-    first_unread = db.scalar(first_unread_query.order_by(DiscussionMessage.created_at).limit(1))
-    last_message = db.scalar(
-        select(DiscussionMessage)
-        .where(DiscussionMessage.discussion_id == discussion.id)
-        .order_by(DiscussionMessage.created_at.desc())
-        .limit(1)
-    )
+        unread = unread.where(DiscussionMessage.created_at > last_read.created_at)
+    unread_count = db.scalar(unread.with_only_columns(func.count())) or 0
+    first_unread = db.scalar(unread.order_by(DiscussionMessage.created_at).limit(1))
+    last_message = db.scalar(messages.order_by(DiscussionMessage.created_at.desc()).limit(1))
     batch = db.get(MediaBatch, discussion.batch_id) if discussion.batch_id else None
     workspace = db.get(Workspace, batch.workspace_id) if batch is not None else None
     return DiscussionResponse(
@@ -207,10 +193,7 @@ def discussion_response(db: Session, discussion: Discussion, user: User) -> Disc
         ),
         mentioned_me=bool(
             db.scalar(
-                select(func.count())
-                .select_from(DiscussionMessage)
-                .where(
-                    DiscussionMessage.discussion_id == discussion.id,
+                messages.with_only_columns(func.count()).where(
                     func.casefold(DiscussionMessage.body).contains(
                         f"@{user.display_name.casefold()}"
                     ),
@@ -273,7 +256,7 @@ def message_response(db: Session, message: DiscussionMessage, user: User) -> Mes
                 author_name=reply_author.display_name if reply_author else "Пользователь",
                 body=reply.body,
             )
-            if reply
+            if reply and not reply.is_automatic
             else None
         ),
         batch_id=message.batch_id,
@@ -328,12 +311,15 @@ def list_discussions(
     search: Annotated[str | None, Query(max_length=200)] = None,
 ) -> list[DiscussionResponse]:
     ensure_general_discussion(db)
-    backfill_comment_messages(db)
+    sync_batch_discussions(db)
     db.commit()
     query = (
         select(Discussion)
         .join(DiscussionMember, DiscussionMember.discussion_id == Discussion.id)
-        .where(DiscussionMember.user_id == user.id)
+        .where(
+            DiscussionMember.user_id == user.id,
+            (Discussion.kind != DiscussionKind.BATCH) | visible_messages(Discussion.id).exists(),
+        )
     )
     if search and search.strip():
         term = f"%{search.strip().casefold()}%"
@@ -448,7 +434,7 @@ def list_messages(
         or client.strip().casefold() not in (discussion.client_name or "").casefold()
     ):
         return []
-    query = select(DiscussionMessage).where(DiscussionMessage.discussion_id == discussion_id)
+    query = visible_messages(discussion_id)
     if q and q.strip():
         query = query.where(func.casefold(DiscussionMessage.body).contains(q.strip().casefold()))
     if author_id:
@@ -475,7 +461,7 @@ def create_message(
     reply = None
     if payload.reply_to_id:
         reply = db.get(DiscussionMessage, payload.reply_to_id)
-        if reply is None or reply.discussion_id != discussion_id:
+        if reply is None or reply.is_automatic or reply.discussion_id != discussion_id:
             raise HTTPException(status_code=400, detail="Reply target is unavailable")
     if payload.batch_id and db.get(MediaBatch, payload.batch_id) is None:
         raise HTTPException(status_code=404, detail="Media batch not found")
@@ -559,7 +545,7 @@ def toggle_reaction(
 ) -> MessageResponse:
     membership(db, discussion_id, user.id)
     message = db.get(DiscussionMessage, message_id)
-    if message is None or message.discussion_id != discussion_id:
+    if message is None or message.is_automatic or message.discussion_id != discussion_id:
         raise HTTPException(status_code=404, detail="Message not found")
     key = (message_id, user.id, payload.emoji)
     existing = db.get(MessageReaction, key)
@@ -581,7 +567,7 @@ def toggle_like(
 ) -> MessageResponse:
     membership(db, discussion_id, user.id)
     message = db.get(DiscussionMessage, message_id)
-    if message is None or message.discussion_id != discussion_id:
+    if message is None or message.is_automatic or message.discussion_id != discussion_id:
         raise HTTPException(status_code=404, detail="Message not found")
     existing = db.get(MessageLike, (message_id, user.id))
     if existing:
@@ -602,9 +588,9 @@ def mark_discussion_read(
 ) -> None:
     member = membership(db, discussion_id, user.id)
     message = db.get(DiscussionMessage, payload.message_id) if payload.message_id else db.scalar(
-        select(DiscussionMessage).where(DiscussionMessage.discussion_id == discussion_id).order_by(DiscussionMessage.created_at.desc()).limit(1)
+        visible_messages(discussion_id).order_by(DiscussionMessage.created_at.desc()).limit(1)
     )
-    if message is not None and message.discussion_id != discussion_id:
+    if message is not None and (message.is_automatic or message.discussion_id != discussion_id):
         raise HTTPException(status_code=400, detail="Message belongs to another discussion")
     member.last_read_message_id = message.id if message else None
     db.query(Notification).filter(
@@ -621,7 +607,13 @@ def list_notifications(
     db: Annotated[Session, Depends(get_db)],
 ) -> NotificationSummary:
     rows = db.scalars(
-        select(Notification).where(Notification.user_id == user.id).order_by(Notification.created_at.desc()).limit(50)
+        select(Notification).where(
+            Notification.user_id == user.id,
+            ~select(DiscussionMessage.id).where(
+                DiscussionMessage.id == Notification.message_id,
+                DiscussionMessage.is_automatic.is_(True),
+            ).exists(),
+        ).order_by(Notification.created_at.desc()).limit(50)
     ).all()
     result: list[NotificationResponse] = []
     for row in rows:
@@ -645,8 +637,7 @@ def mark_all_notifications_read(
     ).all()
     for membership in memberships:
         latest_message_id = db.scalar(
-            select(DiscussionMessage.id)
-            .where(DiscussionMessage.discussion_id == membership.discussion_id)
+            visible_messages(membership.discussion_id).with_only_columns(DiscussionMessage.id)
             .order_by(DiscussionMessage.created_at.desc(), DiscussionMessage.id.desc())
             .limit(1)
         )
