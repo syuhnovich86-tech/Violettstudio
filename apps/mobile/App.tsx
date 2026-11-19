@@ -9,6 +9,7 @@ import { useEffect, useState } from 'react';
 import { ActivityIndicator, AppState, Modal, Platform, Pressable, StyleSheet, View } from 'react-native';
 import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { BrandIntro } from './src/components/BrandIntro';
 import { NavigationIcon } from './src/components/NavigationIcon';
 import { UpdateBanner } from './src/components/UpdateBanner';
 import { AppChromeProvider } from './src/components/AppChrome';
@@ -161,6 +162,7 @@ export default function App() {
       <QueryClientProvider client={queryClient}>
         <AuthProvider>
           <AuthenticatedApp />
+          {Platform.OS === 'android' && <BrandIntro />}
         </AuthProvider>
       </QueryClientProvider>
     </SafeAreaProvider>

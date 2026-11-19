@@ -6,14 +6,14 @@ import { useAppChrome } from './AppChrome';
 import { StudioRule } from './StudioRule';
 import { HelpButton } from './HelpGuide';
 
-export function PageHeader({ title, subtitle, action, onAction, editorial = false }: { editorial?: boolean; title: string; subtitle: string; action?: keyof typeof Ionicons.glyphMap; onAction?: () => void }) {
+export function PageHeader({ title, subtitle, action, onAction, editorial = false, helpTopic }: { helpTopic?: string; editorial?: boolean; title: string; subtitle: string; action?: keyof typeof Ionicons.glyphMap; onAction?: () => void }) {
   const { openProfile } = useAppChrome();
   return (
     <View style={[styles.header, editorial && styles.editorial]}>
       <View style={styles.toolbar}>
         <Text style={[styles.wordmark, editorial && styles.gold]} accessibilityLabel="Violetta">VIOLETTA</Text>
         <View style={styles.actions}>
-        <HelpButton topic={title} />
+        <HelpButton topic={helpTopic ?? title} />
         {action ? <Pressable accessibilityLabel={action === 'sync-outline' ? 'Обновить расписание' : action === 'create-outline' ? 'Создать чат' : 'Добавить папку'} accessibilityRole="button" onPress={onAction} style={({ pressed }) => [styles.action, pressed && styles.pressed]}>
           <Ionicons name={action} size={20} color={colors.ink} />
         </Pressable> : null}

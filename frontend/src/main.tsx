@@ -1,7 +1,9 @@
+import { StudioIntro } from "./StudioIntro";
 import { FormEvent, StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 import "./studio-workspace.css";
+import "./capture.css";
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
@@ -1365,10 +1367,7 @@ function closeCamera() {
     }
   }
 
-  return (
-    <section className={`media-panel media-page-panel ${mode}`}>
-      <div className="section-heading"><div><p className="eyebrow">Папки сотрудников</p><h2>{browseAcrossWorkspaces ? "Материалы из всех папок" : activeWorkspaceInfo?.display_name || "Фото и видео"}</h2>{!browseAcrossWorkspaces && activeWorkspaceInfo?.kind === "private" && <small className="private-note">🔒 Доступ ограничен</small>}</div><span>{browseAcrossWorkspaces ? `${files.length}${hasMore ? "+" : ""}` : activeWorkspaceInfo?.file_count ?? files.length}</span></div>
-      {(session.user.can_create_shared_workspaces || session.user.can_create_private_workspaces) && <details className="workspace-create">
+  const createFolderControl = (session.user.can_create_shared_workspaces || session.user.can_create_private_workspaces) && <details className="workspace-create">
         <summary>＋ Создать папку</summary>
         <form onSubmit={createWorkspace}>
           <label>Название<input name="display_name" required minLength={2} maxLength={120} placeholder="Например, Брови" /></label>
@@ -1378,7 +1377,13 @@ function closeCamera() {
           </select></label>
           <button className="primary" disabled={creatingFolder}>{creatingFolder ? "Создаём…" : "Создать"}</button>
         </form>
-      </details>}
+      </details>;
+
+  return (
+    <section className={`media-panel media-page-panel ${mode}`}>
+      {mode === "browse" && <>
+      <div className="section-heading"><div><p className="eyebrow">Папки сотрудников</p><h2>{browseAcrossWorkspaces ? "Материалы из всех папок" : activeWorkspaceInfo?.display_name || "Фото и видео"}</h2>{!browseAcrossWorkspaces && activeWorkspaceInfo?.kind === "private" && <small className="private-note">🔒 Доступ ограничен</small>}</div><span>{browseAcrossWorkspaces ? `${files.length}${hasMore ? "+" : ""}` : activeWorkspaceInfo?.file_count ?? files.length}</span></div>
+      {createFolderControl}
       <details className="workspace-picker" ref={workspacePicker}>
         <summary><span>Выбрать папку</span><small>{workspaces.length}</small></summary>
         <div className="workspace-tabs" aria-label="Папки сотрудников">
@@ -1388,9 +1393,22 @@ function closeCamera() {
           {sharedWorkspaces.map((workspace) => <button className={activeWorkspace === workspace.id ? "active" : ""} key={workspace.id} onClick={() => { void chooseWorkspace(workspace.id); }}><span aria-hidden="true">▰</span><b>{workspace.display_name}</b><small className="workspace-stats">{workspace.file_count} · {formatStorageSize(workspace.size_bytes)}</small></button>)}
         </div>
       </details>
-      {mode === "add" && <>
-      {uploadWorkspaceInfo?.kind !== "private" && <details className="visit-picker" open>
-        <summary><span>Визит YCLIENTS</span><small>{selectedVisitId === null ? "Без привязки" : "Выбран"}</small></summary>
+      </>}
+      {mode === "add" && <div className="capture-workbench">
+        <section className="capture-sources" aria-label="Съёмка и загрузка">
+          <button className="capture-main" type="button" disabled={busy || !uploadWorkspace} onClick={() => { setCameraMode("photo"); setCameraOpen(true); }}>
+            <span className="capture-shutter-glyph" aria-hidden="true" /><span><strong>Снять фото</strong><small>Один снимок или серия до 20 фото</small></span>
+          </button>
+          <div className="capture-alternatives">
+            <button type="button" disabled={busy || !uploadWorkspace} onClick={() => { setCameraMode("video"); setCameraOpen(true); }}><span aria-hidden="true">▷</span>Снять видео</button>
+            <label className="capture-file"><span aria-hidden="true">＋</span>Из галереи<input aria-label="Выбрать фото и видео из галереи" type="file" accept="image/*,video/*,.heic,.heif,.avif" multiple disabled={busy || !uploadWorkspace} onChange={(event) => { stageFiles(event.target.files); event.target.value = ""; }} /></label>
+          </div>
+        </section>
+        <section className="capture-destination" aria-label="Настройки сохранения">
+      <label className="workspace-select">Папка для сохранения<select aria-label="Папка для сохранения" value={uploadWorkspace} onChange={(event) => { const workspaceId = event.target.value; setUploadWorkspace(workspaceId); localStorage.setItem(uploadWorkspaceStorageKey, workspaceId); if (workspaces.find((workspace) => workspace.id === workspaceId)?.kind === "private") { setSelectedVisitId(null); } }}>{privateWorkspaces.length > 0 && <optgroup label="Приватные папки">{privateWorkspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>🔒 {workspace.display_name}</option>)}</optgroup>}{sharedWorkspaces.length > 0 && <optgroup label="Общие папки">{sharedWorkspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.display_name}</option>)}</optgroup>}</select></label>
+          {createFolderControl}
+      {uploadWorkspaceInfo?.kind !== "private" && <details className="visit-picker capture-visit">
+        <summary><span>Визит YCLIENTS</span><small>{selectedVisitId === null ? "Без привязки" : visits.find((v) => v.record_id === selectedVisitId)?.client_name || "Выбран"}</small></summary>
         <div className="visit-picker-body">
           {session.user.role !== "employee" && !canSwitchAllCalendars && calendarUsers.length > 0 && <label className="calendar-user">Сотрудник<select value={calendarUser} onChange={(event) => setCalendarUser(event.target.value)}>{calendarUsers.map((item) => <option key={item.user_id} value={item.user_id}>{item.display_name}</option>)}</select></label>}
           {canSwitchAllCalendars && <div className="calendar-scope" aria-label="Режим календаря"><button type="button" className={!calendarAll ? "active" : ""} onClick={() => setCalendarAll(false)}>Мой календарь</button><button type="button" className={calendarAll ? "active" : ""} onClick={() => setCalendarAll(true)}>Все календари</button></div>}
@@ -1418,16 +1436,11 @@ function closeCamera() {
       </details>}
       <fieldset className="publication-choice">
         <legend>Можно публиковать?</legend>
-        <label className={publicationAllowed ? "active allowed" : ""}><input type="radio" name="publication" checked={publicationAllowed} onChange={() => setPublicationAllowed(true)} /><span>✓ Можно</span></label>
-        <label className={!publicationAllowed ? "active forbidden" : ""}><input type="radio" name="publication" checked={!publicationAllowed} onChange={() => setPublicationAllowed(false)} /><span>⛔ Запрещено</span></label>
+        <label className={publicationAllowed ? "active allowed" : ""}><input type="radio" name="publication" checked={publicationAllowed} onChange={() => setPublicationAllowed(true)} /><span>Можно</span></label>
+        <label className={!publicationAllowed ? "active forbidden" : ""}><input type="radio" name="publication" checked={!publicationAllowed} onChange={() => setPublicationAllowed(false)} /><span>Запрещено</span></label>
       </fieldset>
-      <label className="workspace-select">Загрузить в папку<select value={uploadWorkspace} onChange={(event) => { const workspaceId = event.target.value; setUploadWorkspace(workspaceId); localStorage.setItem(uploadWorkspaceStorageKey, workspaceId); if (workspaces.find((workspace) => workspace.id === workspaceId)?.kind === "private") { setSelectedVisitId(null); } }}>{privateWorkspaces.length > 0 && <optgroup label="Приватные папки">{privateWorkspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>🔒 {workspace.display_name}</option>)}</optgroup>}{sharedWorkspaces.length > 0 && <optgroup label="Общие папки">{sharedWorkspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.display_name}</option>)}</optgroup>}</select></label>
-      <div className="upload-actions">
-        <label className={`upload-button ${busy ? "disabled" : ""}`}>＋ Из галереи<input type="file" accept="image/*,video/*,.heic,.heif,.avif" multiple disabled={busy || !uploadWorkspace} onChange={(event) => { stageFiles(event.target.files); event.target.value = ""; }} /></label>
-        <button className={`camera-button ${busy ? "disabled" : ""}`} type="button" disabled={busy || !uploadWorkspace} onClick={() => { setCameraMode("photo"); setCameraOpen(true); }}>Фото · серия</button>
-        <button className={`camera-button video-camera-button ${busy ? "disabled" : ""}`} type="button" disabled={busy || !uploadWorkspace} onClick={() => { setCameraMode("video"); setCameraOpen(true); }}>● Снять видео</button>
-      </div>
-      </>}
+        </section>
+      </div>}
       {mode === "browse" && <>
       {(browseAcrossWorkspaces || activeWorkspaceInfo?.kind !== "private") && <details className="visit-picker browse-calendar">
         <summary><span>Календарь визитов</span><small>{browseVisitId !== null ? "Выбран визит" : browseVisitDate ? "Выбран день" : "Все материалы"}</small></summary>
@@ -1558,11 +1571,13 @@ function closeCamera() {
   aria-label="Сохранить фото и видео"
   onClick={() => { if (!busy) cancelPendingBatch(); }}
 >
-  <div className="move-dialog" onClick={(event) => event.stopPropagation()}>
+  <div className="move-dialog capture-review" onClick={(event) => event.stopPropagation()}>
     <h2>Сохранить материалы</h2>
+    <p className="capture-folder-note">В папку «{uploadWorkspaceInfo?.display_name}»</p>
     <p>
       Выбрано файлов: <strong>{pendingFiles.length}</strong>
     </p>
+    <ul className="capture-review-files">{pendingFiles.map((file, index) => <li key={index}><span>{file.name}</span><small>{formatStorageSize(file.size)}</small></li>)}</ul>
     {session.user.can_add_comments && <label>
       Комментарий к серии
       <textarea
@@ -1603,12 +1618,12 @@ function closeCamera() {
       </div>}
 {cameraOpen && <div className="camera-overlay" role="dialog" aria-modal="true" aria-label={cameraMode === "video" ? "Съёмка видео" : "Серийная фотосъёмка"}>
         <div className="camera-dialog">
-          <header><strong>{cameraMode === "video" ? "Съёмка видео" : "Серийная фотосъёмка"}</strong><button onClick={() => closeCamera()} aria-label="Закрыть камеру">×</button></header>
+          <header><div className="camera-destination"><strong>{cameraMode === "video" ? "Съёмка видео" : "Съёмка фото"}</strong><small>{uploadWorkspaceInfo?.display_name}</small></div><button onClick={() => closeCamera()} aria-label="Закрыть камеру">×</button></header>
           <div className="camera-mode-toggle" aria-label="Режим камеры">
             <button type="button" className={cameraMode === "photo" ? "active" : ""} disabled={recording} onClick={() => { setCapturedVideo(null); setCameraMode("photo"); }}>Фото</button>
             <button type="button" className={cameraMode === "video" ? "active" : ""} disabled={recording} onClick={() => { setCapturedFiles([]); setCameraMode("video"); }}>Видео</button>
           </div>
-          <div className="camera-view">
+          <div className="camera-view">{cameraReady && !cameraError && <div className="viewfinder" aria-hidden="true" />}
             <video ref={cameraVideo} autoPlay muted playsInline />
             {!cameraReady && !cameraError && <span>Открываем камеру…</span>}
             {recording && <span className="recording-indicator">● REC</span>}
@@ -3671,7 +3686,7 @@ function Dashboard({ session, onLogout }: { session: Session; onLogout: () => vo
         {session.user.can_access_admin && <button aria-current={screen === "admin" ? "page" : undefined} onClick={openAdmin}>Управление</button>}
       </div></nav>
       {screen === "chats" ? <div className="content chat-page"><DiscussionsPanel session={session} initialMediaId={chatMediaId} onInitialMediaHandled={() => setChatMediaId(null)} /></div> : screen === "admin" ? <div className="content admin-page"><AdminPanel session={session} /></div> : screen === "windows" ? <div className="content content-page"><AvailabilitySchedules session={session} onCreateOnce={() => { setContentAvailability(true); setContentMediaIds([]); setScreen("content"); window.history.pushState({ screen: "content" }, "", "#content"); }} /></div> : screen === "content" ? <div className="content content-page"><ContentPanel session={session} initialMediaIds={contentMediaIds} onInitialMediaHandled={() => setContentMediaIds([])} initialAvailability={contentAvailability} onOpenWindows={openWindows} /></div> : <div className="content">
-        <div className="library-heading"><h1>Медиатека</h1><StoragePanel /></div>
+        <div className="library-heading"><h1>{mediaMode === "add" ? "Съёмка и загрузка" : "Медиатека"}</h1><StoragePanel /></div>
         <section className={`media-page-links ${session.user.can_upload_media ? "" : "single"}`} aria-label="Работа с фото и видео">
           {session.user.can_upload_media && <button className={`media-page-link add ${mediaMode === "add" ? "active" : ""}`} type="button" aria-pressed={mediaMode === "add"} onClick={() => switchMediaMode("add")}><span className="media-link-icon" aria-hidden="true">＋</span><span><small>Новые материалы</small><strong>Добавить фото и видео</strong><em>Выбрать папку, дату и визит YCLIENTS</em></span><b aria-hidden="true">↓</b></button>}
           <button className={`media-page-link browse ${mediaMode === "browse" ? "active" : ""}`} type="button" aria-pressed={mediaMode === "browse"} onClick={() => switchMediaMode("browse")}><span className="media-link-icon" aria-hidden="true">▦</span><span><small>Архив студии</small><strong>Просмотр материалов</strong><em>Папки, календарь, клиенты, даты и геометки</em></span><b aria-hidden="true">↓</b></button>
@@ -3684,6 +3699,10 @@ function Dashboard({ session, onLogout }: { session: Session; onLogout: () => vo
 }
 
 export function App() {
+  const [showIntro, setShowIntro] = useState(() => {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return false;
+    try { return sessionStorage.getItem("studio-entry-seen") !== "1"; } catch { return true; }
+  });
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -3691,8 +3710,14 @@ export function App() {
     api<Session>("/auth/me").then(setSession).catch(() => undefined).finally(() => setLoading(false));
   }, []);
 
-  if (loading) return <main className="shell"><img className="loader" src="/logo.svg" alt="" /></main>;
-  return session ? <Dashboard session={session} onLogout={() => setSession(null)} /> : <Login onLogin={setSession} />;
+  function finishIntro() {
+    try { sessionStorage.setItem("studio-entry-seen", "1"); } catch { /* Storage may be unavailable. */ }
+    setShowIntro(false);
+  }
+  return <>
+    <div inert={showIntro}>{loading ? <main className="shell" aria-label="Загрузка приложения"><img className="loader" src="/logo.svg" alt="" /></main> : session ? <Dashboard session={session} onLogout={() => setSession(null)} /> : <Login onLogin={setSession} />}</div>
+    {showIntro && <StudioIntro onFinish={finishIntro} />}
+  </>;
 }
 
 createRoot(document.getElementById("root")!).render(<StrictMode><App /></StrictMode>);
