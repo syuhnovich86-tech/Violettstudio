@@ -60,7 +60,7 @@ function VisitMedia({ visitId }: { visitId: number }) {
       {selectedFile ? <>
         {selectedFile.media_type === 'video' ? <ProtectedVideo path={`/media/${selectedFile.id}/preview`} /> : <ProtectedImage path={`/media/${selectedFile.id}/preview`} style={styles.preview} />}
         <PrimaryButton title="Скачать или отправить" icon="share-outline" tone="ink" disabled={sharing} onPress={() => void shareFile(selectedFile)} />
-        {Platform.OS === 'android' ? <PrimaryButton title={selectedFile.media_type === 'video' ? 'Сохранить видео в галерею' : 'Сохранить фото в галерею'} icon="download-outline" disabled={sharing} onPress={() => { setSharing(true); void saveToGallery(selectedFile).then(() => Alert.alert('Готово', `${selectedFile.media_type === 'video' ? 'Видео сохранено' : 'Фото сохранено'} в альбом VIOLETTA на телефоне`)).catch((error) => Alert.alert('Не удалось сохранить', error instanceof Error ? error.message : 'Ошибка файла')).finally(() => setSharing(false)); }} /> : null}
+        {(Platform.OS === 'android' || Platform.OS === 'ios') ? <PrimaryButton title={selectedFile.media_type === 'video' ? 'Сохранить видео в галерею' : 'Сохранить фото в галерею'} icon="download-outline" disabled={sharing} onPress={() => { setSharing(true); void saveToGallery(selectedFile).then(() => Alert.alert('Готово', `${selectedFile.media_type === 'video' ? 'Видео сохранено' : 'Фото сохранено'} ${Platform.OS === 'ios' ? 'в Фото' : 'в альбом VIOLETTA на телефоне'}`)).catch((error) => Alert.alert('Не удалось сохранить', error instanceof Error ? error.message : 'Ошибка файла')).finally(() => setSharing(false)); }} /> : null}
       </> : null}
     </Sheet>
   </View>;

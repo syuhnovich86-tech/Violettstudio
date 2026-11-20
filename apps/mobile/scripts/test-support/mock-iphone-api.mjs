@@ -13,7 +13,7 @@ export async function listWorkspaces() { return request('/workspaces'); }
 export async function createWorkspace(name) { return request('/workspaces', { method: 'POST', body: JSON.stringify({ display_name: name, kind: 'private' }) }); }
 export async function allowBackgroundAccessToSession() {}
 export async function authorizedSource(path) { return { uri: root + path, headers: { Authorization: `Bearer ${token}` } }; }
-export function iphoneImportStatus(workspace, key) { return request(`/media/ios-import/status?workspace_id=${encodeURIComponent(workspace)}`, { headers: { 'X-Ios-Import-Key': key } }); }
+export function iphoneImportStatus(workspace, key, checksum, size) { const params = new URLSearchParams({workspace_id:workspace}); if (checksum) params.set('checksum_sha256',checksum); if (size) params.set('size_bytes',String(size)); return request(`/media/ios-import/status?${params}`, { headers: { 'X-Ios-Import-Key': key } }); }
 export function iphoneImportProgress(workspace, key, total) { return request(`/media/ios-import/progress?workspace_id=${encodeURIComponent(workspace)}&total=${total}`, { headers: { 'X-Ios-Import-Key': key } }); }
 export function finishIphoneImport(workspace, key, total) { return request(`/media/ios-import/complete?workspace_id=${encodeURIComponent(workspace)}&total=${total}`, { method: 'POST', headers: { 'X-Ios-Import-Key': key } }); }
 export async function listMedia(workspace) { return request(`/media?workspace_id=${encodeURIComponent(workspace)}`); }

@@ -152,7 +152,7 @@ export async function uploadMedia(input: { uri: string; filename: string; mediaT
   return apiRequest<MediaFile>(query('/media', { workspace_id: input.workspaceId, yclients_record_id: input.visitId, batch_id: input.batchId, publication_allowed: input.publicationAllowed ?? true }), { method: 'POST', body: form }, true, input.mediaType === 'video' ? 900_000 : 180_000);
 }
 
-export const iphoneImportStatus = (workspaceId: string, importKey: string) => apiRequest<{ exists: boolean }>(query('/media/ios-import/status', { workspace_id: workspaceId }), { headers: { 'X-Ios-Import-Key': importKey } });
+export const iphoneImportStatus = (workspaceId: string, importKey: string, checksum?: string, size?: number) => apiRequest<{ exists: boolean; needs_checksum?: boolean }>(query('/media/ios-import/status', { workspace_id: workspaceId, checksum_sha256: checksum, size_bytes: size }), { headers: { 'X-Ios-Import-Key': importKey } });
 export const iphoneImportProgress = (workspaceId: string, importKey: string, total: number) => apiRequest<{ exists: boolean; offset: number }>(query('/media/ios-import/progress', { workspace_id: workspaceId, total }), { headers: { 'X-Ios-Import-Key': importKey } });
 export const finishIphoneImport = (workspaceId: string, importKey: string, total: number) => apiRequest<{ exists: boolean; media_id: string }>(query('/media/ios-import/complete', { workspace_id: workspaceId, total }), { method: 'POST', headers: { 'X-Ios-Import-Key': importKey } }, true, 600_000);
 export const androidImportStatus = (workspaceId: string, importKey: string) => apiRequest<{ exists: boolean }>(query('/media/android-import/status', { workspace_id: workspaceId }), { headers: { 'X-Android-Import-Key': importKey } });
@@ -196,7 +196,7 @@ export const updatePublicationMedia = (id: string, platform: string, publication
 export const updatePublicationCaption = (id: string, platform: string, caption: string | null, publicationId?: string) => apiRequest<ContentItem>(`/content/items/${id}/publications/${platform}/caption${publicationId ? `?publication_id=${encodeURIComponent(publicationId)}` : ''}`, { method: 'PATCH', body: JSON.stringify({ caption }) }, true);
 export const publishTelegram = (id: string) => apiRequest<ContentItem>(`/content/items/${id}/publications/telegram`, { method: 'POST' }, true, 120_000);
 export const deleteContent = (id: string) => apiRequest<void>(`/content/items/${id}`, { method: 'DELETE' }, true);
-export const getContentLibrary = (workspace_id?: string, search?: string, offset = 0) => apiRequest<ContentLibrary>(query('/content/media-library', { workspace_id, search, offset, limit: 100, sort: Platform.OS === 'android' ? 'archive' : undefined, include_forbidden: Platform.OS === 'android' ? true : undefined }));
+export const getContentLibrary = (workspace_id?: string, search?: string, offset = 0) => apiRequest<ContentLibrary>(query('/content/media-library', { workspace_id, search, offset, limit: 100, sort: (Platform.OS === 'android' || Platform.OS === 'ios') ? 'archive' : undefined, include_forbidden: (Platform.OS === 'android' || Platform.OS === 'ios') ? true : undefined }));
 
 export const getStorage = () => apiRequest<StorageStatus>('/storage');
 export const changePassword = (current_password: string, new_password: string) => apiRequest<void>('/auth/password', { method: 'PUT', body: JSON.stringify({ current_password, new_password }) }, true);

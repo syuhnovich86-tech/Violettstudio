@@ -72,6 +72,40 @@ def jpeg_bytes() -> bytes:
     return output.getvalue()
 
 
+def test_iphone_background_original_and_interrupted_resume(client: TestClient, tmp_path: Path) -> None:
+    owner, _ = add_user(tmp_path / 'test.db', 'background-owner', UserRole.OWNER)
+    engine = create_database_engine(f"sqlite:///{tmp_path / 'test.db'}")
+    with Session(engine) as db:
+        db.get(User, owner.id).can_import_ios_photo_library = True
+        folder = Workspace(display_name='iPhone', kind=WorkspaceKind.PRIVATE, owner_id=owner.id)
+        db.add(folder)
+        db.commit()
+        folder_id = folder.id
+    login = client.post('/api/v1/mobile/auth/login', json={'login': 'background-owner', 'password': PASSWORD})
+    headers = {'Authorization': 'Bearer ' + login.json()['access_token'], 'X-Ios-Import-Key': 'a' * 64, 'X-Ios-Filename': 'photo.jpg'}
+    data = jpeg_bytes() + b'a' * (4 * 1024 * 1024 + 31)
+    base = f'/api/v1/media/ios-import'
+    url = f'{base}/original?workspace_id={folder_id}&total={len(data)}'
+    interrupted = client.put(url, headers=headers, content=data[:4 * 1024 * 1024])
+    assert interrupted.status_code == 400
+    progress = client.get(f'{base}/progress?workspace_id={folder_id}&total={len(data)}', headers=headers)
+    assert progress.json()['offset'] == 4 * 1024 * 1024
+    resumed = client.put(f"{base}/chunk?workspace_id={folder_id}&total={len(data)}&offset={progress.json()['offset']}", headers=headers, content=data[progress.json()['offset']:])
+    assert resumed.status_code == 200
+    completed = client.post(f'{base}/complete?workspace_id={folder_id}&total={len(data)}', headers=headers)
+    assert completed.status_code == 200
+    headers['X-Ios-Import-Key'] = 'b' * 64
+    candidate = client.get(f'{base}/status?workspace_id={folder_id}&size_bytes={len(data)}', headers=headers)
+    assert candidate.json()['needs_checksum'] is True
+    match = client.get(f'{base}/status?workspace_id={folder_id}&size_bytes={len(data)}&checksum_sha256={sha256(data).hexdigest()}', headers=headers)
+    assert match.json()['exists'] is True
+    different = client.get(f'{base}/status?workspace_id={folder_id}&size_bytes={len(data)}&checksum_sha256={"0" * 64}', headers=headers)
+    assert different.json()['exists'] is False
+    whole = client.put(url, headers=headers, content=data)
+    assert whole.status_code == 200, whole.text
+    assert whole.json()['exists'] is True
+
+
 def test_phone_sync_defaults_to_publishable_for_new_files(client: TestClient, tmp_path: Path) -> None:
     owner, _ = add_user(tmp_path / "test.db", "sync-owner", UserRole.OWNER)
     engine = create_database_engine(f"sqlite:///{tmp_path / 'test.db'}")

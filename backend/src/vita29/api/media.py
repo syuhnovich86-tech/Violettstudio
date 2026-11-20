@@ -10,7 +10,6 @@ from pydantic import BaseModel
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
-from vita29.api.media_ordering import archive_date, phone_workspace_ids
 
 from vita29.auth.dependencies import get_current_user, require_csrf
 from vita29.db.models import (
@@ -53,6 +52,7 @@ from vita29.media.storage import (
     store_upload,
     thumbnail_path,
 )
+from vita29.api.media_ordering import archive_date, phone_workspace_ids
 from vita29.settings import Settings, get_settings
 from vita29.workspaces.access import can_access_workspace
 
@@ -506,6 +506,7 @@ def ios_import_status(
     settings: Annotated[Settings, Depends(get_settings)],
     workspace_id: Annotated[str, Query()],
     checksum_sha256: Annotated[str | None, Query()] = None,
+    size_bytes: Annotated[int | None, Query(ge=1, le=2 * 1024 * 1024 * 1024 * 1024)] = None,
 ) -> dict[str, bool]:
     workspace = get_accessible_workspace(db, workspace_id, user)
     key = _scoped_ios_import_key(request, user, workspace, settings)
@@ -515,8 +516,16 @@ def ios_import_status(
     if previous is not None and previous.workspace_id != workspace.id:
         raise HTTPException(status_code=409, detail="iPhone import destination changed")
     if previous is None and checksum_sha256:
-        previous = db.scalar(select(MediaFile).where(MediaFile.workspace_id == workspace.id, MediaFile.checksum_sha256 == checksum_sha256, MediaFile.deleted_at.is_(None)).limit(1))
-    return {"exists": previous is not None}
+        query = select(MediaFile.id).where(MediaFile.workspace_id == workspace.id, MediaFile.checksum_sha256 == checksum_sha256, MediaFile.deleted_at.is_(None))
+        if size_bytes is not None:
+            query = query.where(MediaFile.size_bytes == size_bytes)
+        return {"exists": db.scalar(query.limit(1)) is not None, "needs_checksum": False}
+    if previous is not None:
+        return {"exists": True, "needs_checksum": False}
+    if size_bytes is not None:
+        candidate = db.scalar(select(MediaFile.id).where(MediaFile.workspace_id == workspace.id, MediaFile.size_bytes == size_bytes, MediaFile.deleted_at.is_(None)).limit(1))
+        return {"exists": False, "needs_checksum": candidate is not None}
+    return {"exists": False}
 
 
 @router.post("", response_model=MediaResponse, status_code=status.HTTP_201_CREATED)

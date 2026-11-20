@@ -34,12 +34,14 @@ export class Asset {
   async getLivePhotoVideoUri() { return pathToFileURL(globalThis.__assetPaths[this.id + '-live']).href; }
 }
 export const Paths = { cache: process.env.VIOLETTA_TEST_TMP };
+export const FileMode = { ReadOnly: 'r' };
 function pathOf(value) { return value.startsWith('file:') ? fileURLToPath(value) : value; }
 export class File {
   constructor(...parts) { this.path = parts.length === 1 ? pathOf(parts[0]) : join(...parts); this.uri = pathToFileURL(this.path).href; }
   get exists() { return existsSync(this.path); } get size() { return statSync(this.path).size; }
-  create() { writeFileSync(this.path, ''); } write(bytes) { writeFileSync(this.path, bytes); } delete() { unlinkSync(this.path); }
-  open() {
+  create() { writeFileSync(this.path, ''); } async write(bytes) { await new Promise((resolve) => setTimeout(resolve, 25)); writeFileSync(this.path, bytes); } delete() { unlinkSync(this.path); }
+  open(mode) {
+    if (mode !== FileMode.ReadOnly) throw new Error('Photo library originals are read-only');
     const fd = openSync(this.path, 'r'); let offset = 0;
     return { set offset(value) { offset = value; }, get offset() { return offset; }, async readBytes(length) { const buf = Buffer.alloc(length); const count = readSync(fd, buf, 0, length, offset); offset += count; return new Uint8Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + count)); }, close() { closeSync(fd); } };
   }
@@ -49,7 +51,10 @@ export const FileSystemSessionType = { BACKGROUND: 0 };
 export async function deleteAsync(uri) { try { unlinkSync(pathOf(uri)); } catch {} }
 export function createUploadTask(url, uri, options) {
   return { async cancelAsync() {}, async uploadAsync() {
-    const response = await fetch(url, { method: options.httpMethod, headers: options.headers, body: readFileSync(pathOf(uri)) });
+    const original = readFileSync(pathOf(uri));
+    const sent = globalThis.__dropAfterSend && new URL(url).pathname.endsWith('/original')
+      ? original.subarray(0, 4 * 1024 * 1024) : original;
+    const response = await fetch(url, { method: options.httpMethod, headers: options.headers, body: sent });
     const body = await response.text();
     if (globalThis.__dropAfterSend) { globalThis.__dropAfterSend = false; throw new Error('synthetic disconnect after server accepted chunk'); }
     return { status: response.status, body };

@@ -162,7 +162,7 @@ export default function App() {
       <QueryClientProvider client={queryClient}>
         <AuthProvider>
           <AuthenticatedApp />
-          {Platform.OS === 'android' && <BrandIntro />}
+          {(Platform.OS === 'ios' || Platform.OS === 'android') && <BrandIntro />}
         </AuthProvider>
       </QueryClientProvider>
     </SafeAreaProvider>

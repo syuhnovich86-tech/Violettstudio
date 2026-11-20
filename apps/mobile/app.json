@@ -19,9 +19,10 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "ru.violetta.mediacenter",
-      "buildNumber": "3",
-      "runtimeVersion": "0.3.0",
+      "buildNumber": "6",
+      "version": "0.3.0",
       "infoPlist": {
+        "NSPhotoLibraryAddUsageDescription": "Разрешите VIOLETTA сохранять выбранные фото и видео в медиатеку iPhone.",
         "NSPhotoLibraryUsageDescription": "VIOLETTA использует доступ к Фото только по вашему выбору, чтобы копировать материалы в выбранную папку на сервере, включая оригиналы из iCloud.",
         "NSCameraUsageDescription": "Камера используется для добавления фото и видео в медиатеку VIOLETTA.",
         "NSMicrophoneUsageDescription": "Микрофон используется при записи видео в приложении VIOLETTA."
@@ -82,7 +83,8 @@
       "expo-background-task",
       "expo-video",
       "expo-sharing",
-      "expo-updates"
+      "expo-updates",
+      "./plugins/withIosUpdatesDisabled"
     ]
   }
 }

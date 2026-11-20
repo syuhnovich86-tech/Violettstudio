@@ -28,7 +28,7 @@ writeFileSync(fixture, Buffer.concat([png, Buffer.alloc(4 * 1024 * 1024 + 20, 11
 globalThis.__assets = [{ id: 'synthetic-photo', filename: 'fixture.png', mediaType: 'image', creationTime: 1, modificationTime: 2, width: 1, height: 1, duration: null, isFavorite: false, mediaSubtypes: [] }];
 globalThis.__assetPaths = { 'synthetic-photo': fixture };
 assert.equal(await backup.runIphoneBackup(), 0, 'backup is disabled until consent');
-await assert.rejects(() => backup.enableIphoneBackup({ ...user, role: 'employee' }, folder, true));
+await assert.rejects(() => backup.enableIphoneBackup({ ...user, role: 'employee', can_import_ios_photo_library: false }, folder, true));
 assert.equal((await api.listMedia(folder.id)).length, 0);
 globalThis.__dropAfterSend = true;
 await backup.enableIphoneBackup(user, folder, true);

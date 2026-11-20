@@ -48,7 +48,7 @@ export function AddScreen({ route, navigation }: BottomTabScreenProps<RootTabs, 
   const complete = files.filter((file) => file.status === 'done').length;
   async function openCamera() {
     const permission = cameraPermission?.granted ? cameraPermission : await requestCameraPermission();
-    if (!permission.granted) return Alert.alert('Нет доступа к камере', 'Разрешите камеру в системных настройках Android.');
+    if (!permission.granted) return Alert.alert('Нет доступа к камере', 'Разрешите доступ к камере в настройках телефона.');
     setCameraReady(false);
     setCameraOpen(true);
   }

@@ -1,7 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import * as Updates from 'expo-updates';
-import * as Application from 'expo-application';
 import { Query, requestPermissionsAsync } from 'expo-media-library';
 import { useEffect, useState } from 'react';
 import { Alert, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
@@ -18,7 +16,7 @@ import { MaxStoryConnection } from './MaxStoryConnection';
 import { Busy, ErrorState, Field, PrimaryButton, Sheet, formatBytes } from '../components/Common';
 import { HelpButton } from '../components/HelpGuide';
 import { colors, typography } from '../theme';
-import { installAvailableUpdate } from '../updates/updateActions';
+import { AppUpdateRow } from '../components/AppUpdateRow';
 
 const roleLabel: Record<Role, string> = { owner: 'Владелец', admin: 'Администратор', employee: 'Сотрудник' };
 const permissionFields = [
@@ -34,7 +32,6 @@ const permissionFields = [
 
 export function ProfileScreen({ onClose }: { onClose: () => void }) {
   const { user, signOut, refreshUser } = useAuth();
-  const { isUpdateAvailable, isUpdatePending } = Updates.useUpdates();
   const client = useQueryClient();
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [adminOpen, setAdminOpen] = useState(false);
@@ -117,10 +114,6 @@ export function ProfileScreen({ onClose }: { onClose: () => void }) {
     const payload = Object.fromEntries(Object.entries(integrationValues).map(([key, value]) => [key, value.trim() || null]));
     await mutate(() => updateIntegrations(payload), 'Настройки интеграций сохранены');
   }
-  async function checkUpdates() {
-    try { setBusy(true); await installAvailableUpdate(isUpdatePending); }
-    finally { setBusy(false); }
-  }
   async function checkPhotoLibraryAccess() {
     try {
       setBusy(true);
@@ -143,7 +136,7 @@ export function ProfileScreen({ onClose }: { onClose: () => void }) {
     {user ? <AndroidBackupPanel user={user} /> : null}
     {Platform.OS === 'ios' && canUserImportIphoneLibrary(user) ? <Pressable accessibilityRole="button" accessibilityLabel="Проверить доступ к Фото" disabled={busy} onPress={() => void checkPhotoLibraryAccess()} style={styles.row}><View style={styles.rowIcon}><Ionicons name="images-outline" size={20} color={colors.gold} /></View><View style={styles.rowCopy}><Text style={styles.rowTitle}>Проверить доступ к Фото</Text><Text style={styles.rowText}>Только проверка разрешения, без копирования на сервер</Text></View><Ionicons name="chevron-forward" size={19} color={colors.muted} /></Pressable> : null}
     <Text style={styles.section}>Хранилище сервера</Text>{storage.isLoading ? <Busy label="Проверяю хранилище…" /> : storage.error ? <ErrorState message={(storage.error as Error).message} onRetry={() => void storage.refetch()} /> : storage.data ? <View style={styles.card}><View style={styles.storageTop}><Text style={styles.storageValue}>{formatBytes(storage.data.media_bytes)} медиа</Text><Text style={styles.storagePercent}>{storage.data.used_percent}% диска</Text></View><View style={styles.track}><View style={[styles.trackValue, { width: `${Math.min(100, storage.data.used_percent)}%` }]} /></View><Text style={styles.storageText}>Свободно {formatBytes(storage.data.free_bytes)} из {formatBytes(storage.data.total_bytes)}</Text></View> : null}
-    <Text style={styles.section}>Приложение</Text>{Platform.OS === 'android' && <Text style={styles.rowText}>Android · сборка {Application.nativeBuildVersion ?? 'не определена'}</Text>}<Pressable accessibilityRole="button" disabled={busy} onPress={() => void checkUpdates()} style={styles.row}><View style={styles.rowIcon}><Ionicons name="cloud-download-outline" size={20} color={Platform.OS === 'android' && (isUpdateAvailable || isUpdatePending) ? colors.green : colors.gold} /></View><View style={styles.rowCopy}><Text style={styles.rowTitle}>{Platform.OS === 'android' && (isUpdateAvailable || isUpdatePending) ? 'Доступно обновление' : 'Проверить обновления'}</Text>{Platform.OS === 'android' && (isUpdateAvailable || isUpdatePending) ? <Text style={styles.updateAvailable}>{isUpdatePending ? 'Загружено · нажмите, чтобы применить' : 'Нажмите, чтобы установить'}</Text> : <Text style={styles.rowText}>Новые функции загрузятся с сервера без переустановки {Platform.OS === 'ios' ? 'приложения' : 'APK'} · runtime {Updates.runtimeVersion ?? '0.2.0'}</Text>}</View><Ionicons name="chevron-forward" size={19} color={colors.muted} /></Pressable>
+    <Text style={styles.section}>Приложение</Text><AppUpdateRow busy={busy} setBusy={setBusy} />
     <Text style={styles.section}>Безопасность</Text><Pressable onPress={() => setPasswordOpen(true)} style={styles.row}><View style={styles.rowIcon}><Ionicons name="key-outline" size={20} color={colors.gold} /></View><View style={styles.rowCopy}><Text style={styles.rowTitle}>Изменить пароль</Text><Text style={styles.rowText}>Текущий и новый пароль</Text></View><Ionicons name="chevron-forward" size={19} color={colors.muted} /></Pressable>
     {user?.can_access_admin ? <><Text style={styles.section}>Администрирование</Text><Pressable onPress={() => setAdminOpen(true)} style={styles.row}><View style={styles.rowIcon}><Ionicons name="people-outline" size={20} color={colors.gold} /></View><View style={styles.rowCopy}><Text style={styles.rowTitle}>Пользователи и права</Text><Text style={styles.rowText}>Аккаунты, роли, пароли и индивидуальные разрешения</Text></View><Ionicons name="chevron-forward" size={19} color={colors.muted} /></Pressable><Pressable onPress={() => setIntegrationsOpen(true)} style={styles.row}><View style={styles.rowIcon}><Ionicons name="git-network-outline" size={20} color={colors.gold} /></View><View style={styles.rowCopy}><Text style={styles.rowTitle}>Интеграции</Text><Text style={styles.rowText}>OpenAI, Telegram, MAX и Instagram</Text></View><Ionicons name="chevron-forward" size={19} color={colors.muted} /></Pressable></> : null}
     <PrimaryButton title="Выйти из аккаунта" icon="log-out-outline" tone="danger" disabled={busy} onPress={() => Alert.alert('Выйти?', 'Для повторного входа потребуется пароль.', [{ text: 'Отмена', style: 'cancel' }, { text: 'Выйти', style: 'destructive', onPress: () => void signOut() }])} />

@@ -1,6 +1,7 @@
 import * as BackgroundTask from 'expo-background-task';
+import { sha256 } from '@noble/hashes/sha256';
 import * as Crypto from 'expo-crypto';
-import { File, Paths } from 'expo-file-system';
+import { File, FileMode, Paths } from 'expo-file-system';
 import * as FileSystem from 'expo-file-system/legacy';
 import { Asset, AssetField, AssetUriVersion, getPermissionsAsync, MediaType, Query, requestPermissionsAsync } from 'expo-media-library';
 import * as Network from 'expo-network';
@@ -16,11 +17,31 @@ export const IPHONE_BACKUP_TASK = 'violetta-iphone-photo-backup-v2';
 const DEVICE_ID = 'violetta.iphone-backup-device-v2';
 const PAGE_SIZE = 100;
 const CHUNK_SIZE = 4 * 1024 * 1024;
+// The reverse proxy accepts request bodies up to 2 GB; larger files stay resumable.
+const MAX_BACKGROUND_ORIGINAL = 1900 * 1024 * 1024;
 let running: Promise<number> | null = null;
 let activeUpload: FileSystem.UploadTask | null = null;
 let stopRequested = false;
 let foregroundEnabled = false;
-const resolved = new Map<number, { uri: string; temporary: boolean }>();
+const resolved = new Map<number, { uri: string; temporary: boolean; preflightSize?: number }>();
+
+async function iphoneFileSha256(file: File, expectedSize: number, cancelled: () => boolean): Promise<string> {
+  const modified = file.modificationTime;
+  const hash = sha256.create();
+  const handle = file.open(FileMode.ReadOnly);
+  let offset = 0;
+  try {
+    while (offset < expectedSize) {
+      if (cancelled()) throw new Error('Синхронизация приостановлена.');
+      const bytes = await handle.readBytes(Math.min(1024 * 1024, expectedSize - offset));
+      if (!bytes.length) throw new Error('Не удалось прочитать оригинал для проверки.');
+      hash.update(bytes);
+      offset += bytes.length;
+    }
+  } finally { handle.close(); }
+  if (cancelled() || file.size !== expectedSize || (modified != null && file.modificationTime !== modified)) throw new Error('Файл изменился во время проверки. Приложение повторит попытку.');
+  return Array.from(hash.digest(), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
 
 async function forgetResolved(id: number) {
   const value = resolved.get(id);
@@ -138,6 +159,19 @@ async function performBackup(limit: number) {
       const original = new File(uri);
       const total = original.size;
       if (!Number.isSafeInteger(total) || total <= 0) throw new Error('Не удалось определить размер оригинала.');
+      if (cached.preflightSize !== total) {
+        const candidate = await iphoneImportStatus(workspaceId, importKey, undefined, total);
+        if (candidate.exists) { await completeBackupItem(item.id); await forgetResolved(item.id); done++; continue; }
+        if (candidate.needs_checksum) {
+          const checksum = await iphoneFileSha256(original, total, () => stopRequested);
+          const same = await iphoneImportStatus(workspaceId, importKey, checksum, total);
+          const latest = await getBackupSettings(user.id);
+          const verified = (await restoreSession()).user;
+          if (stopRequested || !latest.enabled || latest.workspaceId !== workspaceId || verified.id !== user.id || !canUserImportIphoneLibrary(verified)) throw new Error('Синхронизация приостановлена.');
+          if (same.exists) { await completeBackupItem(item.id); await forgetResolved(item.id); await setBackupError(user.id, null); done++; continue; }
+        }
+        cached.preflightSize = total;
+      }
       const progress = await iphoneImportProgress(workspaceId, importKey, total);
       if (progress.exists) { await completeBackupItem(item.id); await forgetResolved(item.id); done++; continue; }
       if (!Number.isSafeInteger(progress.offset) || progress.offset < 0 || progress.offset > total) throw new Error('Сервер вернул неверное состояние передачи.');
@@ -148,16 +182,30 @@ async function performBackup(limit: number) {
         await finishIphoneImport(workspaceId, importKey, total);
         await completeBackupItem(item.id); await forgetResolved(item.id); await setBackupError(user.id, null); done++; continue;
       }
-      const handle = original.open();
+      const filename = item.part === 'live-video' ? `${item.filename || 'live-photo'}.mov` : item.filename || `iphone-${item.id}`;
+      if (progress.offset === 0 && total <= MAX_BACKGROUND_ORIGINAL) {
+        const source = await authorizedSource(`/media/ios-import/original?workspace_id=${encodeURIComponent(workspaceId)}&total=${total}`);
+        if (!source.headers?.Authorization) throw new Error('Войдите в приложение снова.');
+        activeUpload = FileSystem.createUploadTask(source.uri, uri, { httpMethod: 'PUT', uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT, sessionType: FileSystem.FileSystemSessionType.BACKGROUND, headers: { ...source.headers, 'Content-Type': 'application/octet-stream', 'X-Ios-Import-Key': importKey, 'X-Ios-Filename': encodeURIComponent(filename) } });
+        const response = await activeUpload.uploadAsync();
+        activeUpload = null;
+        if (response?.status !== 404 && response?.status !== 405) {
+          if (!response || response.status < 200 || response.status >= 300) throw new Error(`Не удалось сохранить файл на сервере (${response?.status ?? 'нет ответа'}).`);
+          const acknowledged = JSON.parse(response.body) as { exists?: boolean };
+          if (!acknowledged.exists) throw new Error('Сервер не подтвердил сохранение файла.');
+          await completeBackupItem(item.id); await forgetResolved(item.id); await setBackupError(user.id, null); done++; continue;
+        }
+      }
+      const handle = original.open(FileMode.ReadOnly);
       let bytes: Uint8Array<ArrayBuffer>;
       try { handle.offset = progress.offset; bytes = await handle.readBytes(Math.min(CHUNK_SIZE, total - progress.offset)); }
       finally { handle.close(); }
       if (!bytes.length) throw new Error('Не удалось прочитать часть оригинала.');
       temporaryChunk = new File(Paths.cache, `violetta-iphone-part-${Crypto.randomUUID()}`);
-      temporaryChunk.create(); temporaryChunk.write(bytes);
+      temporaryChunk.create();
+      await temporaryChunk.write(bytes);
       const source = await authorizedSource(`/media/ios-import/chunk?workspace_id=${encodeURIComponent(workspaceId)}&total=${total}&offset=${progress.offset}`);
       if (!source.headers?.Authorization) throw new Error('Войдите в приложение снова.');
-      const filename = item.part === 'live-video' ? `${item.filename || 'live-photo'}.mov` : item.filename || `iphone-${item.id}`;
       activeUpload = FileSystem.createUploadTask(source.uri, temporaryChunk.uri, { httpMethod: 'PUT', uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT, sessionType: FileSystem.FileSystemSessionType.BACKGROUND, headers: { ...source.headers, 'Content-Type': 'application/octet-stream', 'X-Ios-Import-Key': importKey, 'X-Ios-Filename': encodeURIComponent(filename) } });
       const response = await activeUpload.uploadAsync();
       activeUpload = null;
@@ -193,7 +241,7 @@ export function runIphoneBackup(limit = 3) {
   if (!running) running = performBackup(limit).finally(() => { running = null; });
   return running;
 }
-export function runIphoneBackupIfEnabled() { return foregroundEnabled ? runIphoneBackup(5) : Promise.resolve(0); }
+export function runIphoneBackupIfEnabled() { return foregroundEnabled ? runIphoneBackup(50) : Promise.resolve(0); }
 export async function getIphoneBackupState(userId: string) {
   const settings = await getBackupSettings(userId);
   return { settings, counts: settings.workspaceId ? await backupCounts(userId, settings.workspaceId) : { waiting: 0, complete: 0, failed: 0 } };

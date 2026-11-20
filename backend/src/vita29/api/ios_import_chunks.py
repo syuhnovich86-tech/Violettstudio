@@ -122,6 +122,31 @@ async def chunk(request: Request, _: Annotated[AuthSession, Depends(require_csrf
     return await run_in_threadpool(append_chunk, request, user, db, settings, workspace_id, total, offset, bytes(data))
 
 
+@router.put('/original')
+async def original(request: Request, auth: Annotated[AuthSession, Depends(require_csrf)], user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)], settings: Annotated[Settings, Depends(get_settings)], workspace_id: str, total: Annotated[int, Query(gt=0, le=MAX_FILE)]) -> dict:
+    """Accept one OS-managed upload, retaining acknowledged blocks on interruption."""
+    authorized_key(request, user, db, settings, workspace_id)
+    offset = 0
+    pending = bytearray()
+    async for piece in request.stream():
+        pending.extend(piece)
+        while len(pending) >= MAX_CHUNK:
+            block = bytes(pending[:MAX_CHUNK])
+            del pending[:MAX_CHUNK]
+            result = await run_in_threadpool(append_chunk, request, user, db, settings, workspace_id, total, offset, block)
+            if result['exists']:
+                return result
+            offset = result['offset']
+    if pending:
+        result = await run_in_threadpool(append_chunk, request, user, db, settings, workspace_id, total, offset, bytes(pending))
+        if result['exists']:
+            return result
+        offset = result['offset']
+    if offset != total:
+        raise HTTPException(status_code=400, detail='Передача файла не завершена')
+    return await run_in_threadpool(complete, request, auth, user, db, settings, workspace_id, total)
+
+
 @router.post('/complete')
 def complete(request: Request, auth: Annotated[AuthSession, Depends(require_csrf)], user: Annotated[User, Depends(get_current_user)], db: Annotated[Session, Depends(get_db)], settings: Annotated[Settings, Depends(get_settings)], workspace_id: str, total: Annotated[int, Query(gt=0, le=MAX_FILE)]) -> dict:
     key = authorized_key(request, user, db, settings, workspace_id)
